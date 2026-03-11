@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
-import { bomData } from "./data/bomData";
+import {
+  fetchBom,
+  saveBom,
+  getModelLabel,
+  hasBomForSelection,
+  MODEL_IDS,
+  sortBomItems,
+  type BomItem,
+  type ModelId,
+} from "./lib/bomApi";
 import {
   fetchInventory,
   saveInventory,
   type InvItem,
 } from "./lib/inventoryApi";
+
+const STAGE_OPTIONS = [1, 2, 3, 4, 5];
+const LENGTH_OPTIONS = [205, 231, 410, 436, 859, 1282, 1679, 1705, 2102, 2128];
 
 type NeedRow = {
   length_mm: number;
@@ -24,20 +36,21 @@ export default function App() {
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
   const [savingInProgress, setSavingInProgress] = useState(false);
 
-  const [tab, setTab] = useState<"make" | "inv">("make");
+  const [tab, setTab] = useState<"make" | "inv" | "bom">("make");
 
-  const [model, setModel] = useState("CUBE");
-  const [size, setSize] = useState("200x200");
+  const [bom, setBom] = useState<BomItem[]>([]);
+  const [bomLoading, setBomLoading] = useState(true);
+  const [bomLoadError, setBomLoadError] = useState<string | null>(null);
+  const [bomSaveError, setBomSaveError] = useState<string | null>(null);
+  const [bomSaveSuccess, setBomSaveSuccess] = useState<string | null>(null);
+  const [bomSavingInProgress, setBomSavingInProgress] = useState(false);
+
+  const [modelId, setModelId] = useState<ModelId>("cube");
   const [stage, setStage] = useState(1);
   const [units, setUnits] = useState(1);
 
   const [showShortageOnly, setShowShortageOnly] = useState(false);
 
-  const bom = bomData;
-
-  // -------------------------
-  // Load inventory from API
-  // -------------------------
   useEffect(() => {
     setInvLoadError(null);
     setInvLoading(true);
@@ -53,25 +66,22 @@ export default function App() {
       .finally(() => setInvLoading(false));
   }, []);
 
-  // -------------------------
-  // Option Lists
-  // -------------------------
-  const models = useMemo(
-    () => Array.from(new Set(bom.map((x) => x.model))).sort(),
-    [bom]
-  );
+  useEffect(() => {
+    setBomLoadError(null);
+    setBomLoading(true);
+    fetchBom()
+      .then((items) => {
+        setBom(items);
+        setBomLoadError(null);
+      })
+      .catch((err) => {
+        console.error("fetchBom failed:", err);
+        setBomLoadError(err?.message ?? "BOMの読み込みに失敗しました");
+      })
+      .finally(() => setBomLoading(false));
+  }, []);
 
-  const sizes = useMemo(() => {
-    const s = bom.filter((x) => x.model === model).map((x) => x.size);
-    return Array.from(new Set(s)).sort();
-  }, [bom, model]);
-
-  const stages = useMemo(() => {
-    const s = bom
-      .filter((x) => x.model === model && x.size === size)
-      .map((x) => x.stage);
-    return Array.from(new Set(s)).sort((a, b) => a - b);
-  }, [bom, model, size]);
+  const stagesForMake = STAGE_OPTIONS;
 
   // -------------------------
   // Inventory Map
@@ -89,7 +99,7 @@ export default function App() {
   // -------------------------
   const needRows: NeedRow[] = useMemo(() => {
     const filtered = bom.filter(
-      (b) => b.model === model && b.size === size && b.stage === stage
+      (b) => b.model_id === modelId && b.stage === stage
     );
 
     const reqMap = new Map<
@@ -139,7 +149,9 @@ export default function App() {
     );
 
     return out;
-  }, [bom, invMap, model, size, stage, units, showShortageOnly]);
+  }, [bom, invMap, modelId, stage, units, showShortageOnly]);
+
+  const showBomWarning = !hasBomForSelection(bom, modelId, stage);
 
   async function updateInventory(
     length_mm: number,
@@ -172,6 +184,48 @@ export default function App() {
     }
   }
 
+  function bomRowKey(item: BomItem): string {
+    return `${item.model_id}|${item.stage}|${item.length_mm}|${item.screw ? 1 : 0}`;
+  }
+
+  async function addOrUpdateBom(item: BomItem) {
+    if (item.qty_per_unit <= 0) return;
+    setBomSaveError(null);
+    setBomSaveSuccess(null);
+    setBomSavingInProgress(true);
+    const key = bomRowKey(item);
+    const next = bom.filter((b) => bomRowKey(b) !== key);
+    next.push(item);
+    const sorted = sortBomItems(next);
+    try {
+      await saveBom(sorted);
+      setBom(sorted);
+      setBomSaveSuccess("保存しました");
+      window.setTimeout(() => setBomSaveSuccess(null), 2000);
+    } catch (err) {
+      console.error("saveBom failed:", err);
+      setBomSaveError((err as Error)?.message ?? "BOMの保存に失敗しました");
+    } finally {
+      setBomSavingInProgress(false);
+    }
+  }
+
+  async function deleteBomRow(item: BomItem) {
+    setBomSaveError(null);
+    setBomSavingInProgress(true);
+    const next = bom.filter((b) => bomRowKey(b) !== bomRowKey(item));
+    const sorted = sortBomItems(next);
+    try {
+      await saveBom(sorted);
+      setBom(sorted);
+    } catch (err) {
+      console.error("saveBom failed:", err);
+      setBomSaveError((err as Error)?.message ?? "BOMの削除に失敗しました");
+    } finally {
+      setBomSavingInProgress(false);
+    }
+  }
+
   async function copyCutList() {
     const lines = needRows
       .filter((r) => r.shortage > 0)
@@ -189,7 +243,7 @@ export default function App() {
     const rows = needRows.filter((r) => r.shortage > 0);
     const today = new Date();
     const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
-    const productName = `${model} ${size} ${stage}段`;
+    const productName = `${getModelLabel(modelId)} ${stage}段`;
 
     const tableRows = rows
       .map(
@@ -316,36 +370,34 @@ export default function App() {
         >
           在庫
         </button>
+        <button
+          onClick={() => setTab("bom")}
+          style={{
+            ...tabButton,
+            ...(tab === "bom" ? tabButtonActive : tabButtonInactive),
+          }}
+        >
+          BOM登録
+        </button>
       </div>
 
       {tab === "make" ? (
         <>
           <div style={filterRow}>
             <label style={selectLabel}>
-              型
+              モデル
               <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
+                value={modelId}
+                onChange={(e) =>
+                  setModelId((e.target.value as ModelId) || "cube")
+                }
                 style={bigSelect}
                 className="field-large"
               >
-                {models.map((m) => (
-                  <option key={m}>{m}</option>
-                ))}
-              </select>
-            </label>
-
-            <label style={selectLabel}>
-              サイズ
-              <select
-                value={size}
-                onChange={(e) => setSize(e.target.value)}
-                style={bigSelect}
-                className="field-large"
-              >
-                {sizes.map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
+                <option value="cube">{getModelLabel("cube")}</option>
+                <option value="i_board">{getModelLabel("i_board")}</option>
+                <option value="i_plate10">{getModelLabel("i_plate10")}</option>
+                <option value="l">{getModelLabel("l")}</option>
               </select>
             </label>
 
@@ -359,7 +411,7 @@ export default function App() {
                 style={bigSelect}
                 className="field-large"
               >
-                {stages.map((s) => (
+                {stagesForMake.map((s) => (
                   <option key={s}>{s}段</option>
                 ))}
               </select>
@@ -409,42 +461,66 @@ export default function App() {
             </div>
           </div>
 
-          <table style={table}>
-            <thead>
-              <tr>
-                <th style={tableHeaderCell}>長さ</th>
-                <th style={tableHeaderCell}>ネジ</th>
-                <th style={tableHeaderCellRight}>必要</th>
-                <th style={tableHeaderCellRight}>在庫</th>
-                <th style={tableHeaderCellRight}>切る必要</th>
-              </tr>
-            </thead>
-            <tbody>
-              {needRows.map((r) => (
-                <tr
-                  key={`${r.length_mm}-${r.screw}`}
-                  className="data-row"
-                >
-                  <td style={tableCell}>{r.length_mm}mm</td>
-                  <td style={tableCell}>{r.screw ? "有" : "無"}</td>
-                  <td style={tableCellRight}>{r.required}</td>
-                  <td style={tableCellRight}>{r.on_hand}</td>
-                  <td
-                    style={{
-                      ...tableCellRight,
-                      ...(r.shortage > 0
-                        ? shortageCell
-                        : shortageZeroCell),
-                    }}
-                  >
-                    {r.shortage}
-                  </td>
+          {showBomWarning ? (
+            <div
+              style={{
+                marginTop: 16,
+                padding: 16,
+                background: "#fef3c7",
+                border: "1px solid #f59e0b",
+                borderRadius: 8,
+                color: "#92400e",
+                fontSize: 14,
+                fontWeight: 500,
+              }}
+            >
+              このモデル・段数のBOMが登録されていません
+            </div>
+          ) : (
+            <table style={table}>
+              <thead>
+                <tr>
+                  <th style={tableHeaderCell}>長さ</th>
+                  <th style={tableHeaderCell}>ネジ</th>
+                  <th style={tableHeaderCellRight}>必要</th>
+                  <th style={tableHeaderCellRight}>在庫</th>
+                  <th style={tableHeaderCellRight}>切る必要</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {needRows.map((r) => {
+                  const hasSurplus =
+                    r.shortage === 0 && r.on_hand >= r.required;
+                  return (
+                    <tr
+                      key={`${r.length_mm}-${r.screw}`}
+                      className="data-row"
+                      style={
+                        hasSurplus ? rowSurplus : undefined
+                      }
+                    >
+                      <td style={tableCell}>{r.length_mm}mm</td>
+                      <td style={tableCell}>{r.screw ? "有" : "無"}</td>
+                      <td style={tableCellRight}>{r.required}</td>
+                      <td style={tableCellRight}>{r.on_hand}</td>
+                      <td
+                        style={{
+                          ...tableCellRight,
+                          ...(r.shortage > 0
+                            ? shortageCell
+                            : shortageZeroCell),
+                        }}
+                      >
+                        {r.shortage}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </>
-      ) : (
+      ) : tab === "inv" ? (
         <>
           {invLoading && (
             <div style={{ marginBottom: 12, fontSize: 14, color: "#6b7280" }}>
@@ -487,7 +563,227 @@ export default function App() {
             savingInProgress={savingInProgress}
           />
         </>
-      )}
+      ) : tab === "bom" ? (
+        <>
+          {bomLoading && (
+            <div style={{ marginBottom: 12, fontSize: 14, color: "#6b7280" }}>
+              読み込み中...
+            </div>
+          )}
+          {bomLoadError && (
+            <div
+              style={{
+                padding: 12,
+                marginBottom: 12,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: 8,
+                color: "#b91c1c",
+                fontSize: 14,
+              }}
+            >
+              {bomLoadError}
+            </div>
+          )}
+          {bomSaveError && (
+            <div
+              style={{
+                padding: 12,
+                marginBottom: 12,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: 8,
+                color: "#b91c1c",
+                fontSize: 14,
+              }}
+            >
+              {bomSaveError}
+            </div>
+          )}
+          {bomSaveSuccess && (
+            <div
+              style={{
+                padding: 12,
+                marginBottom: 12,
+                background: "#f0fdf4",
+                border: "1px solid #bbf7d0",
+                borderRadius: 8,
+                color: "#166534",
+                fontSize: 14,
+              }}
+            >
+              {bomSaveSuccess}
+            </div>
+          )}
+          <BomPanel
+            bom={bom}
+            onAddOrUpdate={addOrUpdateBom}
+            onDelete={deleteBomRow}
+            savingInProgress={bomSavingInProgress}
+          />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function BomPanel({
+  bom,
+  onAddOrUpdate,
+  onDelete,
+  savingInProgress,
+}: {
+  bom: BomItem[];
+  onAddOrUpdate: (item: BomItem) => Promise<void>;
+  onDelete: (item: BomItem) => Promise<void>;
+  savingInProgress: boolean;
+}) {
+  const [modelId, setModelId] = useState<ModelId>("cube");
+  const [stage, setStage] = useState(1);
+  const [lengthMm, setLengthMm] = useState(205);
+  const [screw, setScrew] = useState(false);
+  const [qtyPerUnit, setQtyPerUnit] = useState(1);
+
+  const sorted = sortBomItems(bom);
+
+  const handleSubmit = () => {
+    const qty = Math.max(0, Math.floor(qtyPerUnit));
+    if (qty <= 0) return;
+    onAddOrUpdate({
+      model_id: modelId,
+      model: getModelLabel(modelId),
+      stage,
+      length_mm: lengthMm,
+      screw,
+      qty_per_unit: qty,
+    });
+  };
+
+  return (
+    <div>
+      <h3 style={{ marginBottom: 12 }}>BOM登録（■13 必要部材マスタ）</h3>
+      <div style={filterRow}>
+        <label style={selectLabel}>
+          モデル
+          <select
+            value={modelId}
+            onChange={(e) =>
+              setModelId((e.target.value as ModelId) || "cube")
+            }
+            style={bigSelect}
+            className="field-large"
+          >
+            {MODEL_IDS.map((id) => (
+              <option key={id} value={id}>
+                {getModelLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={selectLabel}>
+          段数（候補 1～5、手入力可）
+          <input
+            type="number"
+            min={1}
+            value={stage}
+            onChange={(e) =>
+              setStage(parseInt(e.target.value || "1", 10))
+            }
+            list="bom-stage-list"
+            style={bigInput}
+            className="field-large"
+          />
+          <datalist id="bom-stage-list">
+            {STAGE_OPTIONS.map((s) => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
+        </label>
+        <label style={selectLabel}>
+          部材長さ(mm)（候補から選択 or 手入力）
+          <input
+            type="number"
+            min={1}
+            value={lengthMm}
+            onChange={(e) =>
+              setLengthMm(parseInt(e.target.value || "205", 10))
+            }
+            list="bom-length-list"
+            style={bigInput}
+            className="field-large"
+          />
+          <datalist id="bom-length-list">
+            {LENGTH_OPTIONS.map((L) => (
+              <option key={L} value={L} />
+            ))}
+          </datalist>
+        </label>
+        <label style={selectLabel}>
+          ネジ
+          <select
+            value={screw ? "1" : "0"}
+            onChange={(e) => setScrew(e.target.value === "1")}
+            style={bigSelect}
+            className="field-large"
+          >
+            <option value="0">無</option>
+            <option value="1">有</option>
+          </select>
+        </label>
+        <label style={selectLabel}>
+          必要本数
+          <input
+            type="number"
+            min={1}
+            value={qtyPerUnit}
+            onChange={(e) =>
+              setQtyPerUnit(parseInt(e.target.value || "1", 10))
+            }
+            style={bigInput}
+            className="field-large"
+          />
+        </label>
+        <button
+          onClick={handleSubmit}
+          disabled={savingInProgress}
+          style={secondaryButton}
+        >
+          {savingInProgress ? "保存中..." : "追加/更新"}
+        </button>
+      </div>
+      <table style={table}>
+        <thead>
+          <tr>
+            <th style={tableHeaderCell}>モデル</th>
+            <th style={tableHeaderCell}>段数</th>
+            <th style={tableHeaderCell}>サイズ</th>
+            <th style={tableHeaderCell}>ネジ</th>
+            <th style={tableHeaderCellRight}>必要本数</th>
+            <th style={tableHeaderCell}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r) => (
+            <tr key={`${r.model_id}-${r.stage}-${r.length_mm}-${r.screw}`} className="data-row">
+              <td style={tableCell}>{r.model}</td>
+              <td style={tableCell}>{r.stage}</td>
+              <td style={tableCell}>■13x{r.length_mm}</td>
+              <td style={tableCell}>{r.screw ? "有" : "無"}</td>
+              <td style={tableCellRight}>{r.qty_per_unit}</td>
+              <td style={tableCell}>
+                <button
+                  type="button"
+                  onClick={() => onDelete(r)}
+                  disabled={savingInProgress}
+                  style={{ ...secondaryButton, padding: "4px 10px", fontSize: 12 }}
+                >
+                  削除
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -710,6 +1006,11 @@ const shortageCell: React.CSSProperties = {
 
 const shortageZeroCell: React.CSSProperties = {
   color: "#9ca3af",
+};
+
+const rowSurplus: React.CSSProperties = {
+  opacity: 0.75,
+  color: "#6b7280",
 };
 
 const primaryButton: React.CSSProperties = {
