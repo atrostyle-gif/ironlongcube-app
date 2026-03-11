@@ -90,7 +90,69 @@ export default function App() {
       .finally(() => setBomLoading(false));
   }, []);
 
-  const stagesForMake = STAGE_OPTIONS;
+  // -------------------------
+  // 製作タブ: 候補生成（BOM から動的に）
+  // -------------------------
+
+  const availableModels = useMemo(
+    () =>
+      Array.from(
+        bom.reduce((map, b) => {
+          if (!map.has(b.model_id)) {
+            map.set(b.model_id, b.model);
+          }
+          return map;
+        }, new Map<ModelId, string>())
+      )
+        .map(([id, label]) => ({ id, label }))
+        .sort(
+          (a, b) =>
+            MODEL_IDS.indexOf(a.id) - MODEL_IDS.indexOf(b.id)
+        ),
+    [bom]
+  );
+
+  const availableSizes = useMemo(() => {
+    const set = new Set<string>();
+    for (const b of bom) {
+      if (b.model_id === modelId) {
+        set.add(b.size);
+      }
+    }
+    return BOM_SIZES.filter((s) => set.has(s));
+  }, [bom, modelId]);
+
+  const availableStages = useMemo(() => {
+    const set = new Set<number>();
+    for (const b of bom) {
+      if (b.model_id === modelId && b.size === size) {
+        set.add(b.stage);
+      }
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }, [bom, modelId, size]);
+
+  // 選択値の自動補正
+  useEffect(() => {
+    if (bom.length === 0 || availableModels.length === 0) return;
+    if (!availableModels.some((m) => m.id === modelId)) {
+      setModelId(availableModels[0].id);
+    }
+  }, [bom, availableModels, modelId]);
+
+  useEffect(() => {
+    if (bom.length === 0 || availableSizes.length === 0) return;
+    if (!availableSizes.includes(size)) {
+      setSize(availableSizes[0]);
+    }
+  }, [bom, availableSizes, size]);
+
+  useEffect(() => {
+    if (bom.length === 0 || availableStages.length === 0) return;
+    if (!availableStages.includes(stage)) {
+      setStage(availableStages[0]);
+    }
+  }, [bom, availableStages, stage]);
 
   // -------------------------
   // Inventory Map
@@ -161,7 +223,7 @@ export default function App() {
     return out;
   }, [bom, invMap, modelId, size, stage, units, showShortageOnly]);
 
-  const showBomWarning = !hasBomForSelection(bom, modelId, size, stage);
+  const showBomWarning = bom.length === 0;
 
   async function updateInventory(
     length_mm: number,
@@ -435,11 +497,13 @@ export default function App() {
                 }
                 style={bigSelect}
                 className="field-large"
+                disabled={availableModels.length === 0}
               >
-                <option value="cube">{getModelLabel("cube")}</option>
-                <option value="i_board">{getModelLabel("i_board")}</option>
-                <option value="i_plate10">{getModelLabel("i_plate10")}</option>
-                <option value="l">{getModelLabel("l")}</option>
+                {availableModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -450,8 +514,9 @@ export default function App() {
                 onChange={(e) => setSize(e.target.value)}
                 style={bigSelect}
                 className="field-large"
+                disabled={availableSizes.length === 0}
               >
-                {BOM_SIZES.map((s) => (
+                {availableSizes.map((s) => (
                   <option key={s} value={s}>
                     {s}
                   </option>
@@ -468,8 +533,9 @@ export default function App() {
                 }
                 style={bigSelect}
                 className="field-large"
+                disabled={availableStages.length === 0}
               >
-                {stagesForMake.map((s) => (
+                {availableStages.map((s) => (
                   <option key={s} value={s}>
                     {s}段
                   </option>
@@ -534,7 +600,7 @@ export default function App() {
                 fontWeight: 500,
               }}
             >
-              このモデル・サイズ・段数のBOMが登録されていません
+              BOMが登録されていません
             </div>
           ) : (
             <table style={table}>

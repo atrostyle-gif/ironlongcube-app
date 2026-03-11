@@ -2,6 +2,7 @@ import type { Handler } from "@netlify/functions";
 import dotenv from "dotenv";
 import path from "node:path";
 import { Dropbox } from "dropbox";
+import { getDropboxAccessToken } from "./lib/dropboxAuth";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
@@ -28,6 +29,32 @@ function jsonBody(obj: object): string {
   return JSON.stringify(obj);
 }
 
+function extractDropboxErrorDetail(err: unknown): string {
+  const anyErr = err as any;
+  const parts: string[] = [];
+  if (anyErr?.status) parts.push(`status=${anyErr.status}`);
+  if (anyErr?.error_summary) parts.push(`error_summary=${anyErr.error_summary}`);
+  if (anyErr?.error) {
+    try {
+      parts.push(`error=${JSON.stringify(anyErr.error)}`);
+    } catch {
+      parts.push("error=[unserializable]");
+    }
+  }
+  if (anyErr?.response) {
+    const resp = anyErr.response;
+    if (resp.status) parts.push(`response.status=${resp.status}`);
+    if (resp.data) {
+      try {
+        parts.push(`response.data=${JSON.stringify(resp.data)}`);
+      } catch {
+        parts.push("response.data=[unserializable]");
+      }
+    }
+  }
+  return parts.join("; ") || "unknown Dropbox error";
+}
+
 async function getDownloadedFileAsText(
   result: { fileBinary?: Buffer; fileBlob?: Blob }
 ): Promise<string> {
@@ -45,13 +72,20 @@ export const handler: Handler = async (event) => {
     return { statusCode: 200, headers: jsonHeaders, body: "" };
   }
 
-  const token = process.env.DROPBOX_ACCESS_TOKEN;
-  if (!token) {
-    console.error("bom: DROPBOX_ACCESS_TOKEN not set");
+  let token: string;
+  try {
+    token = await getDropboxAccessToken();
+  } catch (err) {
+    const msg = (err as Error)?.message ?? "Failed to get Dropbox access token";
+    console.error("bom: getDropboxAccessToken failed", err);
     return {
       statusCode: 500,
       headers: jsonHeaders,
-      body: jsonBody({ ok: false, error: "DROPBOX_ACCESS_TOKEN not set" }),
+      body: jsonBody({
+        ok: false,
+        error: "Dropbox token error",
+        detail: msg,
+      }),
     };
   }
 
@@ -89,12 +123,22 @@ export const handler: Handler = async (event) => {
         };
       }
       console.error("bom GET error:", err);
+      console.error("bom GET error detail:", {
+        status: (err as any)?.status,
+        error: (err as any)?.error,
+        responseStatus: (err as any)?.response?.status,
+        responseData: (err as any)?.response?.data,
+        error_summary: (err as any)?.error_summary,
+      });
+      const detail = extractDropboxErrorDetail(err);
       return {
         statusCode: 500,
         headers: jsonHeaders,
         body: jsonBody({
           ok: false,
-          error: (err as Error)?.message ?? "Failed to load BOM",
+          error: "Dropbox API error",
+          detail:
+            ((err as Error)?.message ?? "Failed to load BOM") + " | " + detail,
         }),
       };
     }
@@ -137,12 +181,22 @@ export const handler: Handler = async (event) => {
       };
     } catch (err) {
       console.error("bom POST error:", err);
+      console.error("bom POST error detail:", {
+        status: (err as any)?.status,
+        error: (err as any)?.error,
+        responseStatus: (err as any)?.response?.status,
+        responseData: (err as any)?.response?.data,
+        error_summary: (err as any)?.error_summary,
+      });
+      const detail = extractDropboxErrorDetail(err);
       return {
         statusCode: 500,
         headers: jsonHeaders,
         body: jsonBody({
           ok: false,
-          error: (err as Error)?.message ?? "Failed to save BOM",
+          error: "Dropbox API error",
+          detail:
+            ((err as Error)?.message ?? "Failed to save BOM") + " | " + detail,
         }),
       };
     }

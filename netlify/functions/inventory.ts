@@ -2,9 +2,8 @@ import type { Handler } from "@netlify/functions";
 import dotenv from "dotenv";
 import path from "node:path";
 import { Dropbox } from "dropbox";
+import { getDropboxAccessToken } from "./lib/dropboxAuth";
 
-// ローカル (netlify dev): .env から DROPBOX_ACCESS_TOKEN を読む
-// 本番: Netlify の環境変数が process.env に注入されるため、dotenv が無くても token は取得できる
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 // Dropbox App Folder ルートの inventory.json（App タイプが App folder であること）
@@ -25,6 +24,32 @@ const jsonHeaders = {
 
 function jsonBody(obj: object): string {
   return JSON.stringify(obj);
+}
+
+function extractDropboxErrorDetail(err: unknown): string {
+  const anyErr = err as any;
+  const parts: string[] = [];
+  if (anyErr?.status) parts.push(`status=${anyErr.status}`);
+  if (anyErr?.error_summary) parts.push(`error_summary=${anyErr.error_summary}`);
+  if (anyErr?.error) {
+    try {
+      parts.push(`error=${JSON.stringify(anyErr.error)}`);
+    } catch {
+      parts.push("error=[unserializable]");
+    }
+  }
+  if (anyErr?.response) {
+    const resp = anyErr.response;
+    if (resp.status) parts.push(`response.status=${resp.status}`);
+    if (resp.data) {
+      try {
+        parts.push(`response.data=${JSON.stringify(resp.data)}`);
+      } catch {
+        parts.push("response.data=[unserializable]");
+      }
+    }
+  }
+  return parts.join("; ") || "unknown Dropbox error";
 }
 
 /** Dropbox filesDownload の result から UTF-8 文字列を取得（fileBinary / fileBlob 両対応） */
@@ -49,22 +74,19 @@ export const handler: Handler = async (event) => {
     };
   }
 
-  const token =
-    process.env.DROPBOX_ACCESS_TOKEN ||
-    process.env["DROPBOX_ACCESS_TOKEN"] ||
-    (globalThis as any).process?.env?.DROPBOX_ACCESS_TOKEN;
-
-  console.log("DROPBOX token loaded:", !!token);
-
-  // 本番で 500 の場合は Netlify の DROPBOX_ACCESS_TOKEN と Dropbox App Folder 設定を確認
-  if (!token) {
-    console.error("inventory: DROPBOX_ACCESS_TOKEN not set");
+  let token: string;
+  try {
+    token = await getDropboxAccessToken();
+  } catch (err) {
+    const msg = (err as Error)?.message ?? "Failed to get Dropbox access token";
+    console.error("inventory: getDropboxAccessToken failed", err);
     return {
       statusCode: 500,
       headers: jsonHeaders,
       body: jsonBody({
         ok: false,
-        error: "DROPBOX_ACCESS_TOKEN not set",
+        error: "Dropbox token error",
+        detail: msg,
       }),
     };
   }
@@ -107,11 +129,19 @@ export const handler: Handler = async (event) => {
         };
       }
       console.error("inventory GET error:", err);
+      console.error("inventory GET error detail:", {
+        status: (err as any)?.status,
+        error: (err as any)?.error,
+        responseStatus: (err as any)?.response?.status,
+        responseData: (err as any)?.response?.data,
+        error_summary: (err as any)?.error_summary,
+      });
       const message = (err as Error)?.message ?? "Failed to load inventory";
+      const detail = extractDropboxErrorDetail(err);
       return {
         statusCode: 500,
         headers: jsonHeaders,
-        body: jsonBody({ ok: false, error: message }),
+        body: jsonBody({ ok: false, error: "Dropbox API error", detail: `${message} | ${detail}` }),
       };
     }
   }
@@ -147,11 +177,19 @@ export const handler: Handler = async (event) => {
       };
     } catch (err) {
       console.error("inventory POST error:", err);
+      console.error("inventory POST error detail:", {
+        status: (err as any)?.status,
+        error: (err as any)?.error,
+        responseStatus: (err as any)?.response?.status,
+        responseData: (err as any)?.response?.data,
+        error_summary: (err as any)?.error_summary,
+      });
       const message = (err as Error)?.message ?? "Failed to save inventory";
+      const detail = extractDropboxErrorDetail(err);
       return {
         statusCode: 500,
         headers: jsonHeaders,
-        body: jsonBody({ ok: false, error: message }),
+        body: jsonBody({ ok: false, error: "Dropbox API error", detail: `${message} | ${detail}` }),
       };
     }
   }
