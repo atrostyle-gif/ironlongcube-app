@@ -4,11 +4,11 @@ import {
   fetchBom,
   saveBom,
   getModelLabel,
-  hasBomForSelection,
   BOM_SIZES,
   MODEL_IDS,
   sortBomItems,
   type BomItem,
+  type BomSize,
   type ModelId,
 } from "./lib/bomApi";
 import {
@@ -54,7 +54,7 @@ export default function App() {
   const [bomSavingInProgress, setBomSavingInProgress] = useState(false);
 
   const [modelId, setModelId] = useState<ModelId>("cube");
-  const [size, setSize] = useState("200x200");
+  const [size, setSize] = useState<BomSize>("200x200");
   const [stage, setStage] = useState(1);
   const [units, setUnits] = useState(1);
 
@@ -511,7 +511,9 @@ export default function App() {
               ラックサイズ
               <select
                 value={size}
-                onChange={(e) => setSize(e.target.value)}
+                onChange={(e) =>
+                  setSize((e.target.value as BomSize) || "200x200")
+                }
                 style={bigSelect}
                 className="field-large"
                 disabled={availableSizes.length === 0}
@@ -919,7 +921,9 @@ function BomPanel({
           ラックサイズ
           <select
             value={size}
-            onChange={(e) => setSize(e.target.value)}
+            onChange={(e) =>
+              setSize((e.target.value as BomSize) || "200x200")
+            }
             style={bigSelect}
             className="field-large"
           >
