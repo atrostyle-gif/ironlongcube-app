@@ -1057,7 +1057,7 @@ function InventoryPanel({
   ) => Promise<void>;
   savingInProgress: boolean;
 }) {
-  const [lengthMm, setLengthMm] = useState(205);
+  const [lengthMm, setLengthMm] = useState(0);
   const [screw, setScrew] = useState(false);
   const [qty, setQty] = useState(0);
 
@@ -1076,10 +1076,13 @@ function InventoryPanel({
           長さ(mm)
           <input
             type="number"
-            value={lengthMm}
-            onChange={(e) =>
-              setLengthMm(parseInt(e.target.value || "0", 10))
-            }
+            value={lengthMm === 0 ? "" : lengthMm}
+            onChange={(e) => {
+              const v = e.target.value;
+              setLengthMm(v === "" ? 0 : Number(v) || 0);
+            }}
+            placeholder="長さ"
+            inputMode="numeric"
             style={bigInput}
             className="field-large"
           />
@@ -1102,10 +1105,13 @@ function InventoryPanel({
           本数
           <input
             type="number"
-            value={qty}
-            onChange={(e) =>
-              setQty(parseInt(e.target.value || "0", 10))
-            }
+            value={qty === 0 ? "" : qty}
+            onChange={(e) => {
+              const v = e.target.value;
+              setQty(v === "" ? 0 : Number(v) || 0);
+            }}
+            placeholder="本数"
+            inputMode="numeric"
             style={bigInput}
             className="field-large"
           />
