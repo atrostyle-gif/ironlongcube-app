@@ -10,6 +10,7 @@ const DROPBOX_PATH = "/ironlongcube/bom.json";
 type BomItem = {
   model_id?: string;
   model: string;
+  size?: string;
   stage: number;
   length_mm: number;
   screw: boolean;

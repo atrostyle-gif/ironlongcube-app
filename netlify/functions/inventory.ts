@@ -49,10 +49,12 @@ export const handler: Handler = async (event) => {
     };
   }
 
-  const token = process.env.DROPBOX_ACCESS_TOKEN;
-  console.log("cwd:", process.cwd());
-  console.log("env path:", path.resolve(process.cwd(), ".env"));
-  console.log("DROPBOX token loaded:", Boolean(token));
+  const token =
+    process.env.DROPBOX_ACCESS_TOKEN ||
+    process.env["DROPBOX_ACCESS_TOKEN"] ||
+    (globalThis as any).process?.env?.DROPBOX_ACCESS_TOKEN;
+
+  console.log("DROPBOX token loaded:", !!token);
 
   // 本番で 500 の場合は Netlify の DROPBOX_ACCESS_TOKEN と Dropbox App Folder 設定を確認
   if (!token) {

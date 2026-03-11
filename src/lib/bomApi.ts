@@ -5,6 +5,7 @@ export type ModelId = "cube" | "i_board" | "i_plate10" | "l";
 export type BomItem = {
   model_id: ModelId;
   model: string;
+  size: string;
   stage: number;
   length_mm: number;
   screw: boolean;
@@ -12,6 +13,16 @@ export type BomItem = {
 };
 
 export const MODEL_IDS: ModelId[] = ["cube", "i_board", "i_plate10", "l"];
+
+/** BOM サイズ候補（製作・BOM登録で使用） */
+export const BOM_SIZES = ["200x200", "200x400", "400x400"] as const;
+export type BomSize = (typeof BOM_SIZES)[number];
+
+const SIZE_ORDER: Record<string, number> = {
+  "200x200": 1,
+  "200x400": 2,
+  "400x400": 3,
+};
 
 const MODEL_ID_TO_LABEL: Record<ModelId, string> = {
   cube: "CUBE型",
@@ -50,6 +61,7 @@ export function sortBomItems(items: BomItem[]): BomItem[] {
   return [...items].sort(
     (a, b) =>
       MODEL_ORDER[a.model_id] - MODEL_ORDER[b.model_id] ||
+      (SIZE_ORDER[a.size] ?? 99) - (SIZE_ORDER[b.size] ?? 99) ||
       a.stage - b.stage ||
       a.length_mm - b.length_mm ||
       Number(a.screw) - Number(b.screw)
@@ -59,14 +71,18 @@ export function sortBomItems(items: BomItem[]): BomItem[] {
 export function hasBomForSelection(
   bom: BomItem[],
   model_id: ModelId,
+  size: string,
   stage: number
 ): boolean {
-  return bom.some((b) => b.model_id === model_id && b.stage === stage);
+  return bom.some(
+    (b) => b.model_id === model_id && b.size === size && b.stage === stage
+  );
 }
 
 function normalizeItem(raw: {
   model_id?: string;
   model?: string;
+  size?: string;
   stage?: number;
   length_mm?: number;
   screw?: boolean;
@@ -77,9 +93,12 @@ function normalizeItem(raw: {
       ? (raw.model_id as ModelId)
       : normalizeModelId(raw.model);
   const model = MODEL_ID_TO_LABEL[model_id] ?? raw.model ?? "CUBE型";
+  const size =
+    raw.size && BOM_SIZES.includes(raw.size as BomSize) ? raw.size : "200x200";
   return {
     model_id,
     model,
+    size,
     stage: Number(raw.stage) || 1,
     length_mm: Number(raw.length_mm) || 205,
     screw: Boolean(raw.screw),

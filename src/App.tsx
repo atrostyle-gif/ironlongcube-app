@@ -5,6 +5,7 @@ import {
   saveBom,
   getModelLabel,
   hasBomForSelection,
+  BOM_SIZES,
   MODEL_IDS,
   sortBomItems,
   type BomItem,
@@ -15,6 +16,13 @@ import {
   saveInventory,
   type InvItem,
 } from "./lib/inventoryApi";
+import {
+  getTemplateItems,
+  TEMPLATE_MODEL_IDS,
+  TEMPLATE_SIZES,
+  type TemplateModelId,
+  type TemplateSize,
+} from "./data/bomTemplates";
 
 const STAGE_OPTIONS = [1, 2, 3, 4, 5];
 const LENGTH_OPTIONS = [205, 231, 410, 436, 859, 1282, 1679, 1705, 2102, 2128];
@@ -46,6 +54,7 @@ export default function App() {
   const [bomSavingInProgress, setBomSavingInProgress] = useState(false);
 
   const [modelId, setModelId] = useState<ModelId>("cube");
+  const [size, setSize] = useState("200x200");
   const [stage, setStage] = useState(1);
   const [units, setUnits] = useState(1);
 
@@ -99,7 +108,8 @@ export default function App() {
   // -------------------------
   const needRows: NeedRow[] = useMemo(() => {
     const filtered = bom.filter(
-      (b) => b.model_id === modelId && b.stage === stage
+      (b) =>
+        b.model_id === modelId && b.size === size && b.stage === stage
     );
 
     const reqMap = new Map<
@@ -149,9 +159,9 @@ export default function App() {
     );
 
     return out;
-  }, [bom, invMap, modelId, stage, units, showShortageOnly]);
+  }, [bom, invMap, modelId, size, stage, units, showShortageOnly]);
 
-  const showBomWarning = !hasBomForSelection(bom, modelId, stage);
+  const showBomWarning = !hasBomForSelection(bom, modelId, size, stage);
 
   async function updateInventory(
     length_mm: number,
@@ -185,7 +195,7 @@ export default function App() {
   }
 
   function bomRowKey(item: BomItem): string {
-    return `${item.model_id}|${item.stage}|${item.length_mm}|${item.screw ? 1 : 0}`;
+    return `${item.model_id}|${item.size}|${item.stage}|${item.length_mm}|${item.screw ? 1 : 0}`;
   }
 
   async function addOrUpdateBom(item: BomItem) {
@@ -226,6 +236,38 @@ export default function App() {
     }
   }
 
+  /** テンプレート適用: "applied" または "not_defined" */
+  async function applyTemplate(
+    templateModelId: TemplateModelId,
+    size: TemplateSize,
+    stage: number
+  ): Promise<"applied" | "not_defined"> {
+    const items = getTemplateItems(templateModelId, size, stage);
+    if (!items || items.length === 0) return "not_defined";
+    setBomSaveError(null);
+    setBomSaveSuccess(null);
+    setBomSavingInProgress(true);
+    try {
+      let next = [...bom];
+      for (const item of items) {
+        next = next.filter((b) => bomRowKey(b) !== bomRowKey(item));
+        next.push(item);
+      }
+      const sorted = sortBomItems(next);
+      await saveBom(sorted);
+      setBom(sorted);
+      setBomSaveSuccess("テンプレートを適用しました");
+      window.setTimeout(() => setBomSaveSuccess(null), 2000);
+      return "applied";
+    } catch (err) {
+      console.error("applyTemplate failed:", err);
+      setBomSaveError((err as Error)?.message ?? "テンプレートの適用に失敗しました");
+      return "not_defined";
+    } finally {
+      setBomSavingInProgress(false);
+    }
+  }
+
   async function copyCutList() {
     const lines = needRows
       .filter((r) => r.shortage > 0)
@@ -243,7 +285,7 @@ export default function App() {
     const rows = needRows.filter((r) => r.shortage > 0);
     const today = new Date();
     const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
-    const productName = `${getModelLabel(modelId)} ${stage}段`;
+    const productName = `${getModelLabel(modelId)} ${size} ${stage}段`;
 
     const tableRows = rows
       .map(
@@ -402,6 +444,22 @@ export default function App() {
             </label>
 
             <label style={selectLabel}>
+              ラックサイズ
+              <select
+                value={size}
+                onChange={(e) => setSize(e.target.value)}
+                style={bigSelect}
+                className="field-large"
+              >
+                {BOM_SIZES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={selectLabel}>
               段数
               <select
                 value={stage}
@@ -412,7 +470,9 @@ export default function App() {
                 className="field-large"
               >
                 {stagesForMake.map((s) => (
-                  <option key={s}>{s}段</option>
+                  <option key={s} value={s}>
+                    {s}段
+                  </option>
                 ))}
               </select>
             </label>
@@ -474,7 +534,7 @@ export default function App() {
                 fontWeight: 500,
               }}
             >
-              このモデル・段数のBOMが登録されていません
+              このモデル・サイズ・段数のBOMが登録されていません
             </div>
           ) : (
             <table style={table}>
@@ -619,6 +679,7 @@ export default function App() {
             bom={bom}
             onAddOrUpdate={addOrUpdateBom}
             onDelete={deleteBomRow}
+            onApplyTemplate={applyTemplate}
             savingInProgress={bomSavingInProgress}
           />
         </>
@@ -631,18 +692,31 @@ function BomPanel({
   bom,
   onAddOrUpdate,
   onDelete,
+  onApplyTemplate,
   savingInProgress,
 }: {
   bom: BomItem[];
   onAddOrUpdate: (item: BomItem) => Promise<void>;
   onDelete: (item: BomItem) => Promise<void>;
+  onApplyTemplate: (
+    templateModelId: TemplateModelId,
+    size: TemplateSize,
+    stage: number
+  ) => Promise<"applied" | "not_defined">;
   savingInProgress: boolean;
 }) {
   const [modelId, setModelId] = useState<ModelId>("cube");
+  const [size, setSize] = useState("200x200");
   const [stage, setStage] = useState(1);
   const [lengthMm, setLengthMm] = useState(205);
   const [screw, setScrew] = useState(false);
   const [qtyPerUnit, setQtyPerUnit] = useState(1);
+
+  const [templateModelId, setTemplateModelId] =
+    useState<TemplateModelId>("cube");
+  const [templateSize, setTemplateSize] = useState<TemplateSize>("200x200");
+  const [templateStage, setTemplateStage] = useState(1);
+  const [templateMessage, setTemplateMessage] = useState<string | null>(null);
 
   const sorted = sortBomItems(bom);
 
@@ -652,6 +726,7 @@ function BomPanel({
     onAddOrUpdate({
       model_id: modelId,
       model: getModelLabel(modelId),
+      size,
       stage,
       length_mm: lengthMm,
       screw,
@@ -659,9 +734,103 @@ function BomPanel({
     });
   };
 
+  async function handleApplyTemplate() {
+    setTemplateMessage(null);
+    const result = await onApplyTemplate(templateModelId, templateSize, templateStage);
+    if (result === "not_defined") {
+      setTemplateMessage("この条件のテンプレートは未登録です");
+    }
+  }
+
   return (
     <div>
       <h3 style={{ marginBottom: 12 }}>BOM登録（■13 必要部材マスタ）</h3>
+
+      <div style={{ marginBottom: 16 }}>
+        <h4 style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
+          テンプレート生成
+        </h4>
+        <div style={filterRow}>
+          <label style={selectLabel}>
+            テンプレートモデル
+            <select
+              value={templateModelId}
+              onChange={(e) => {
+                setTemplateModelId((e.target.value as TemplateModelId) || "cube");
+                setTemplateMessage(null);
+              }}
+              style={bigSelect}
+              className="field-large"
+            >
+              {TEMPLATE_MODEL_IDS.map((id) => (
+                <option key={id} value={id}>
+                  {getModelLabel(id)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label style={selectLabel}>
+            ラックサイズ
+            <select
+              value={templateSize}
+              onChange={(e) => {
+                setTemplateSize((e.target.value as TemplateSize) || "200x200");
+                setTemplateMessage(null);
+              }}
+              style={bigSelect}
+              className="field-large"
+            >
+              {TEMPLATE_SIZES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label style={selectLabel}>
+            段数
+            <select
+              value={templateStage}
+              onChange={(e) => {
+                setTemplateStage(parseInt(e.target.value, 10) || 1);
+                setTemplateMessage(null);
+              }}
+              style={bigSelect}
+              className="field-large"
+            >
+              {STAGE_OPTIONS.map((s) => (
+                <option key={s} value={s}>
+                  {s}段
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={handleApplyTemplate}
+            disabled={savingInProgress}
+            style={secondaryButton}
+          >
+            {savingInProgress ? "適用中..." : "テンプレート生成"}
+          </button>
+        </div>
+        {templateMessage && (
+          <div
+            style={{
+              marginTop: 8,
+              padding: 10,
+              background: "#fef3c7",
+              border: "1px solid #f59e0b",
+              borderRadius: 6,
+              color: "#92400e",
+              fontSize: 13,
+            }}
+          >
+            {templateMessage}
+          </div>
+        )}
+      </div>
+
       <div style={filterRow}>
         <label style={selectLabel}>
           モデル
@@ -676,6 +845,21 @@ function BomPanel({
             {MODEL_IDS.map((id) => (
               <option key={id} value={id}>
                 {getModelLabel(id)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={selectLabel}>
+          ラックサイズ
+          <select
+            value={size}
+            onChange={(e) => setSize(e.target.value)}
+            style={bigSelect}
+            className="field-large"
+          >
+            {BOM_SIZES.map((s) => (
+              <option key={s} value={s}>
+                {s}
               </option>
             ))}
           </select>
@@ -700,7 +884,7 @@ function BomPanel({
           </datalist>
         </label>
         <label style={selectLabel}>
-          部材長さ(mm)（候補から選択 or 手入力）
+          部材長さ
           <input
             type="number"
             min={1}
@@ -755,8 +939,9 @@ function BomPanel({
         <thead>
           <tr>
             <th style={tableHeaderCell}>モデル</th>
+            <th style={tableHeaderCell}>ラックサイズ</th>
             <th style={tableHeaderCell}>段数</th>
-            <th style={tableHeaderCell}>サイズ</th>
+            <th style={tableHeaderCell}>部材サイズ</th>
             <th style={tableHeaderCell}>ネジ</th>
             <th style={tableHeaderCellRight}>必要本数</th>
             <th style={tableHeaderCell}></th>
@@ -764,8 +949,9 @@ function BomPanel({
         </thead>
         <tbody>
           {sorted.map((r) => (
-            <tr key={`${r.model_id}-${r.stage}-${r.length_mm}-${r.screw}`} className="data-row">
+            <tr key={`${r.model_id}-${r.size}-${r.stage}-${r.length_mm}-${r.screw}`} className="data-row">
               <td style={tableCell}>{r.model}</td>
+              <td style={tableCell}>{r.size}</td>
               <td style={tableCell}>{r.stage}</td>
               <td style={tableCell}>■13x{r.length_mm}</td>
               <td style={tableCell}>{r.screw ? "有" : "無"}</td>
