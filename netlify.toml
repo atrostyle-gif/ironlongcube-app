@@ -1,0 +1,12 @@
+# Vite ビルド → dist を公開。Functions は netlify/functions（本番で DROPBOX_ACCESS_TOKEN を環境変数に設定すること）
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[dev]
+  command = "npm run dev"
+  targetPort = 5173
+  port = 8888
+  autoLaunch = true
+  functions = "netlify/functions"
