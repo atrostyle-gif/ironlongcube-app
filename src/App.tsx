@@ -357,15 +357,15 @@ export default function App() {
             r.shortage <= 0
               ? 0
               : r.length_mm * r.shortage + KERF_MM * (r.shortage - 1);
-          return `<tr>
-            <td contenteditable="true">${i + 1}</td>
-            <td contenteditable="true">SS黒皮</td>
-            <td contenteditable="true">■13x${r.length_mm}</td>
-            <td contenteditable="true">${r.required}</td>
-            <td contenteditable="true">${r.on_hand}</td>
-            <td contenteditable="true" class="cut-qty">${r.shortage}</td>
-            <td contenteditable="true">${r.screw ? "MC (TAP加工)" : "溶接"}</td>
-            <td contenteditable="true" class="total-length">${totalMm}</td>
+          return `<tr data-length-mm="${r.length_mm}">
+            <td>${i + 1}</td>
+            <td>SS黒皮</td>
+            <td>■13x${r.length_mm}</td>
+            <td class="editable-required" contenteditable="true">${r.required}</td>
+            <td class="editable-onhand" contenteditable="true">${r.on_hand}</td>
+            <td class="cut-qty calc-shortage">${r.shortage}</td>
+            <td>${r.screw ? "MC (TAP加工)" : "溶接"}</td>
+            <td class="total-length calc-total">${totalMm}</td>
           </tr>`;
         }
       )
@@ -382,7 +382,6 @@ export default function App() {
   .toolbar { margin-bottom: 12px; }
   .toolbar button { padding: 8px 16px; font-size: 14px; cursor: pointer; }
   .header { display: flex; justify-content: space-between; margin-bottom: 16px; font-size: 14px; }
-  .header [contenteditable] { min-width: 8em; outline: 1px dotted #999; padding: 2px 4px; }
   .product { font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { border: 1px solid #333; padding: 6px 8px; text-align: left; }
@@ -390,11 +389,12 @@ export default function App() {
   td:nth-child(1), td:nth-child(4), td:nth-child(5), td:nth-child(6), td:nth-child(7), td:nth-child(8) { text-align: right; }
   .cut-qty { width: 4em; max-width: 4em; }
   .total-length { white-space: nowrap; text-align: right; }
+  [contenteditable="true"] { outline: 1px dotted #999; }
   @media print {
     .toolbar { display: none !important; }
     @page { size: A4; margin: 15mm; }
     body { font-family: sans-serif; }
-    .header [contenteditable] { outline: none; }
+    [contenteditable="true"] { outline: none; }
   }
 </style>
 </head>
@@ -403,8 +403,8 @@ export default function App() {
     <button type="button" onclick="window.print()">印刷</button>
   </div>
   <div class="header">
-    <span class="product">品名：<span contenteditable="true">${productName}</span></span>
-    <span>発注日：<span contenteditable="true">${dateStr}</span></span>
+    <span class="product">品名：${productName}</span>
+    <span>発注日：${dateStr}</span>
   </div>
   <table>
     <thead>
@@ -421,6 +421,34 @@ export default function App() {
     </thead>
     <tbody>${tableRows || "<tr><td colspan=\"8\">切断必要なし</td></tr>"}</tbody>
   </table>
+  <script>
+    (function() {
+      var KERF = 3;
+      function recalcRow(tr) {
+        var len = parseInt(tr.getAttribute("data-length-mm"), 10);
+        if (isNaN(len)) return;
+        var cells = tr.querySelectorAll("td");
+        if (cells.length < 8) return;
+        var required = parseInt(tr.querySelector(".editable-required").textContent.trim(), 10) || 0;
+        var onhand = parseInt(tr.querySelector(".editable-onhand").textContent.trim(), 10) || 0;
+        var shortage = Math.max(0, required - onhand);
+        var total = shortage <= 0 ? 0 : len * shortage + KERF * (shortage - 1);
+        tr.querySelector(".calc-shortage").textContent = shortage;
+        tr.querySelector(".calc-total").textContent = total;
+      }
+      function init() {
+        var tbody = document.querySelector("table tbody");
+        if (!tbody) return;
+        [].forEach.call(tbody.querySelectorAll("tr[data-length-mm]"), function(tr) {
+          [].forEach.call(tr.querySelectorAll(".editable-required, .editable-onhand"), function(cell) {
+            cell.addEventListener("input", function() { recalcRow(tr); });
+          });
+        });
+      }
+      if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+      else init();
+    })();
+  </script>
 </body>
 </html>`;
 
