@@ -344,7 +344,7 @@ export default function App() {
   }
 
   function printCutSheet() {
-    const rows = needRows.filter((r) => r.shortage > 0);
+    const rows = needRows;
     const today = new Date();
     const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
     const productName = `${getModelLabel(modelId)} ${size} ${stage}段`;
@@ -357,7 +357,8 @@ export default function App() {
             r.shortage <= 0
               ? 0
               : r.length_mm * r.shortage + KERF_MM * (r.shortage - 1);
-          return `<tr data-length-mm="${r.length_mm}">
+          const requiredPerUnit = units > 0 ? Math.round(r.required / units) : r.required;
+          return `<tr data-length-mm="${r.length_mm}" data-required-per-unit="${requiredPerUnit}">
             <td>${i + 1}</td>
             <td>SS黒皮</td>
             <td>■13x${r.length_mm}</td>
@@ -381,8 +382,10 @@ export default function App() {
   body { font-family: sans-serif; margin: 0; padding: 15mm; }
   .toolbar { margin-bottom: 12px; }
   .toolbar button { padding: 8px 16px; font-size: 14px; cursor: pointer; }
-  .header { display: flex; justify-content: space-between; margin-bottom: 16px; font-size: 14px; }
-  .product { font-weight: 600; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; font-size: 14px; flex-wrap: wrap; gap: 8px; }
+  .product { font-weight: 600; font-size: 1.4rem; }
+  .header-units { display: flex; align-items: center; gap: 6px; }
+  .header-units [contenteditable="true"] { min-width: 2.5em; text-align: right; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { border: 1px solid #333; padding: 6px 8px; text-align: left; }
   th { background: #eee; font-weight: 600; text-align: center; }
@@ -404,6 +407,7 @@ export default function App() {
   </div>
   <div class="header">
     <span class="product">品名：${productName}</span>
+    <span class="header-units">製作台数：<span id="units-input" contenteditable="true">${units}</span>台</span>
     <span>発注日：${dateStr}</span>
   </div>
   <table>
@@ -419,7 +423,7 @@ export default function App() {
         <th class="total-length">総長(mm)</th>
       </tr>
     </thead>
-    <tbody>${tableRows || "<tr><td colspan=\"8\">切断必要なし</td></tr>"}</tbody>
+    <tbody>${tableRows.length ? tableRows : "<tr><td colspan=\"8\">切断必要なし</td></tr>"}</tbody>
   </table>
   <script>
     (function() {
@@ -427,14 +431,23 @@ export default function App() {
       function recalcRow(tr) {
         var len = parseInt(tr.getAttribute("data-length-mm"), 10);
         if (isNaN(len)) return;
-        var cells = tr.querySelectorAll("td");
-        if (cells.length < 8) return;
-        var required = parseInt(tr.querySelector(".editable-required").textContent.trim(), 10) || 0;
+        var reqCell = tr.querySelector(".editable-required");
+        if (!reqCell) return;
+        var required = parseInt(reqCell.textContent.trim(), 10) || 0;
         var onhand = parseInt(tr.querySelector(".editable-onhand").textContent.trim(), 10) || 0;
         var shortage = Math.max(0, required - onhand);
         var total = shortage <= 0 ? 0 : len * shortage + KERF * (shortage - 1);
         tr.querySelector(".calc-shortage").textContent = shortage;
         tr.querySelector(".calc-total").textContent = total;
+      }
+      function recalcAllFromUnits() {
+        var u = parseInt(document.getElementById("units-input").textContent.trim(), 10) || 0;
+        var per = Math.max(0, u);
+        [].forEach.call(document.querySelectorAll("tr[data-required-per-unit]"), function(tr) {
+          var rpu = parseInt(tr.getAttribute("data-required-per-unit"), 10) || 0;
+          tr.querySelector(".editable-required").textContent = rpu * per;
+          recalcRow(tr);
+        });
       }
       function init() {
         var tbody = document.querySelector("table tbody");
@@ -444,6 +457,8 @@ export default function App() {
             cell.addEventListener("input", function() { recalcRow(tr); });
           });
         });
+        var unitsEl = document.getElementById("units-input");
+        if (unitsEl) unitsEl.addEventListener("input", recalcAllFromUnits);
       }
       if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
       else init();
