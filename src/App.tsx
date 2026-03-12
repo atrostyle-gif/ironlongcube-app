@@ -358,14 +358,14 @@ export default function App() {
               ? 0
               : r.length_mm * r.shortage + KERF_MM * (r.shortage - 1);
           return `<tr>
-            <td>${i + 1}</td>
-            <td>SS黒皮</td>
-            <td>■13x${r.length_mm}</td>
-            <td>${r.on_hand}</td>
-            <td>${r.required}</td>
-            <td class="cut-qty">${r.shortage}</td>
-            <td>${r.screw ? "MC (TAP加工)" : "溶接"}</td>
-            <td class="total-length">${totalMm}</td>
+            <td contenteditable="true">${i + 1}</td>
+            <td contenteditable="true">SS黒皮</td>
+            <td contenteditable="true">■13x${r.length_mm}</td>
+            <td contenteditable="true">${r.required}</td>
+            <td contenteditable="true">${r.on_hand}</td>
+            <td contenteditable="true" class="cut-qty">${r.shortage}</td>
+            <td contenteditable="true">${r.screw ? "MC (TAP加工)" : "溶接"}</td>
+            <td contenteditable="true" class="total-length">${totalMm}</td>
           </tr>`;
         }
       )
@@ -379,36 +379,44 @@ export default function App() {
 <style>
   * { box-sizing: border-box; }
   body { font-family: sans-serif; margin: 0; padding: 15mm; }
+  .toolbar { margin-bottom: 12px; }
+  .toolbar button { padding: 8px 16px; font-size: 14px; cursor: pointer; }
   .header { display: flex; justify-content: space-between; margin-bottom: 16px; font-size: 14px; }
+  .header [contenteditable] { min-width: 8em; outline: 1px dotted #999; padding: 2px 4px; }
   .product { font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { border: 1px solid #333; padding: 6px 8px; text-align: left; }
-  th { background: #eee; font-weight: 600; }
+  th { background: #eee; font-weight: 600; text-align: center; }
   td:nth-child(1), td:nth-child(4), td:nth-child(5), td:nth-child(6), td:nth-child(7), td:nth-child(8) { text-align: right; }
   .cut-qty { width: 4em; max-width: 4em; }
   .total-length { white-space: nowrap; text-align: right; }
   @media print {
+    .toolbar { display: none !important; }
     @page { size: A4; margin: 15mm; }
     body { font-family: sans-serif; }
+    .header [contenteditable] { outline: none; }
   }
 </style>
 </head>
 <body>
+  <div class="toolbar">
+    <button type="button" onclick="window.print()">印刷</button>
+  </div>
   <div class="header">
-    <span class="product">品名：${productName}</span>
-    <span>発注日：${dateStr}</span>
+    <span class="product">品名：<span contenteditable="true">${productName}</span></span>
+    <span>発注日：<span contenteditable="true">${dateStr}</span></span>
   </div>
   <table>
     <thead>
       <tr>
         <th>No</th>
-        <th>材質</th>
+        <th>材種</th>
         <th>サイズ</th>
-        <th>在庫数</th>
         <th>必要数</th>
-        <th class="cut-qty">切断本数</th>
+        <th>在庫数</th>
+        <th class="cut-qty">切断数</th>
         <th>次工程</th>
-        <th class="total-length">総長</th>
+        <th class="total-length">総長(mm)</th>
       </tr>
     </thead>
     <tbody>${tableRows || "<tr><td colspan=\"8\">切断必要なし</td></tr>"}</tbody>
@@ -418,13 +426,12 @@ export default function App() {
 
     const w = window.open("", "_blank");
     if (!w) {
-      alert("ポップアップがブロックされています。印刷するには許可してください。");
+      alert("ポップアップがブロックされています。別ウィンドウで開くには許可してください。");
       return;
     }
     w.document.write(html);
     w.document.close();
     w.focus();
-    w.onload = () => w.print();
   }
 
   return (
