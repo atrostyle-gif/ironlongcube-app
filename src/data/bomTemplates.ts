@@ -211,6 +211,7 @@ export function getTemplateItems(
         length_mm: r.length_mm,
         tap: r.tap,
         qty_per_unit: r.qty_per_unit,
+        confirmed: false,
       });
     }
   }

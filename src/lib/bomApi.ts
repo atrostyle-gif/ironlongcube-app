@@ -10,6 +10,8 @@ export type BomItem = {
   length_mm: number;
   tap: boolean;
   qty_per_unit: number;
+  /** 確定済み（ロック）: 同一 model_id+size+stage で共通 */
+  confirmed?: boolean;
 };
 
 export const MODEL_IDS: ModelId[] = ["cube", "i_board", "i_plate10", "l"];
@@ -95,6 +97,7 @@ function normalizeItem(raw: {
   tap?: boolean;
   screw?: boolean;
   qty_per_unit?: number;
+  confirmed?: boolean;
 }): BomItem {
   const model_id =
     raw.model_id && MODEL_IDS.includes(raw.model_id as ModelId)
@@ -111,6 +114,7 @@ function normalizeItem(raw: {
     length_mm: Number(raw.length_mm) || 205,
     tap: normalizeTapFromRaw(raw),
     qty_per_unit: Number(raw.qty_per_unit) || 0,
+    confirmed: typeof raw.confirmed === "boolean" ? raw.confirmed : false,
   };
 }
 

@@ -39,7 +39,6 @@ import {
 } from "./lib/drawingApi";
 
 const STAGE_OPTIONS = [1, 2, 3, 4, 5];
-const LENGTH_OPTIONS = [205, 231, 410, 436, 859, 1282, 1679, 1705, 2102, 2128];
 
 function buildProductionSummaryLines(
   list: ProductionItem[],
@@ -374,39 +373,44 @@ export default function App() {
     return `${item.model_id}|${item.size}|${item.stage}|${item.length_mm}|${item.tap ? 1 : 0}`;
   }
 
-  async function addOrUpdateBom(item: BomItem) {
-    if (item.qty_per_unit <= 0) return;
+  /** 選択中の BOM セットだけ置き換えて保存（他モデルは変更しない） */
+  async function saveSelectedBom(
+    selectedModelId: ModelId,
+    selectedSize: string,
+    selectedStage: number,
+    editorRows: { length_mm: number; tap: boolean; qty: number }[],
+    confirmed: boolean
+  ) {
     setBomSaveError(null);
     setBomSaveSuccess(null);
     setBomSavingInProgress(true);
-    const key = bomRowKey(item);
-    const next = bom.filter((b) => bomRowKey(b) !== key);
-    next.push(item);
-    const sorted = sortBomItems(next);
+    const others = bom.filter(
+      (b) =>
+        !(
+          b.model_id === selectedModelId &&
+          b.size === selectedSize &&
+          b.stage === selectedStage
+        )
+    );
+    const updated = editorRows.map((r) => ({
+      model_id: selectedModelId,
+      model: getModelLabel(selectedModelId),
+      size: selectedSize,
+      stage: selectedStage,
+      length_mm: r.length_mm,
+      tap: r.tap,
+      qty_per_unit: r.qty,
+      confirmed,
+    }));
+    const nextBom = sortBomItems([...others, ...updated]);
     try {
-      await saveBom(sorted);
-      setBom(sorted);
+      await saveBom(nextBom);
+      setBom(nextBom);
       setBomSaveSuccess("保存しました");
       window.setTimeout(() => setBomSaveSuccess(null), 2000);
     } catch (err) {
       console.error("saveBom failed:", err);
       setBomSaveError((err as Error)?.message ?? "BOMの保存に失敗しました");
-    } finally {
-      setBomSavingInProgress(false);
-    }
-  }
-
-  async function deleteBomRow(item: BomItem) {
-    setBomSaveError(null);
-    setBomSavingInProgress(true);
-    const next = bom.filter((b) => bomRowKey(b) !== bomRowKey(item));
-    const sorted = sortBomItems(next);
-    try {
-      await saveBom(sorted);
-      setBom(sorted);
-    } catch (err) {
-      console.error("saveBom failed:", err);
-      setBomSaveError((err as Error)?.message ?? "BOMの削除に失敗しました");
     } finally {
       setBomSavingInProgress(false);
     }
@@ -1298,8 +1302,7 @@ export default function App() {
           )}
           <BomPanel
             bom={bom}
-            onAddOrUpdate={addOrUpdateBom}
-            onDelete={deleteBomRow}
+            onSaveSelectedBom={saveSelectedBom}
             onApplyTemplate={applyTemplate}
             savingInProgress={bomSavingInProgress}
           />
@@ -1309,16 +1312,27 @@ export default function App() {
   );
 }
 
+type EditableBomRow = {
+  id: string;
+  length_mm: number;
+  tap: boolean;
+  qty: number;
+};
+
 function BomPanel({
   bom,
-  onAddOrUpdate,
-  onDelete,
+  onSaveSelectedBom,
   onApplyTemplate,
   savingInProgress,
 }: {
   bom: BomItem[];
-  onAddOrUpdate: (item: BomItem) => Promise<void>;
-  onDelete: (item: BomItem) => Promise<void>;
+  onSaveSelectedBom: (
+    modelId: ModelId,
+    size: string,
+    stage: number,
+    rows: { length_mm: number; tap: boolean; qty: number }[],
+    confirmed: boolean
+  ) => Promise<void>;
   onApplyTemplate: (
     templateModelId: TemplateModelId,
     size: TemplateSize,
@@ -1329,9 +1343,11 @@ function BomPanel({
   const [modelId, setModelId] = useState<ModelId>("cube");
   const [size, setSize] = useState("200x200");
   const [stage, setStage] = useState(1);
-  const [lengthMm, setLengthMm] = useState(205);
-  const [tap, setTap] = useState(false);
-  const [qtyPerUnit, setQtyPerUnit] = useState(1);
+  const [bomEditorRows, setBomEditorRows] = useState<EditableBomRow[]>([]);
+  const [selectedBomConfirmed, setSelectedBomConfirmed] = useState(false);
+  const [bomUnlockedForEdit, setBomUnlockedForEdit] = useState(false);
+  const [confirmCheckbox, setConfirmCheckbox] = useState(false);
+  const [editorValidationError, setEditorValidationError] = useState<string | null>(null);
 
   const [templateModelId, setTemplateModelId] =
     useState<TemplateModelId>("cube");
@@ -1339,21 +1355,77 @@ function BomPanel({
   const [templateStage, setTemplateStage] = useState(1);
   const [templateMessage, setTemplateMessage] = useState<string | null>(null);
 
-  const sorted = sortBomItems(bom);
+  const selectedItems = useMemo(
+    () =>
+      bom.filter(
+        (b) =>
+          b.model_id === modelId && b.size === size && b.stage === stage
+      ),
+    [bom, modelId, size, stage]
+  );
 
-  const handleSubmit = () => {
-    const qty = Math.max(0, Math.floor(qtyPerUnit));
-    if (qty <= 0) return;
-    onAddOrUpdate({
-      model_id: modelId,
-      model: getModelLabel(modelId),
-      size,
-      stage,
-      length_mm: lengthMm,
-      tap,
-      qty_per_unit: qty,
-    });
-  };
+  useEffect(() => {
+    setBomEditorRows(
+      selectedItems.map((r) => ({
+        id: crypto.randomUUID?.() ?? `row-${r.length_mm}-${r.tap}-${Date.now()}`,
+        length_mm: r.length_mm,
+        tap: r.tap,
+        qty: r.qty_per_unit,
+      }))
+    );
+    setSelectedBomConfirmed(selectedItems[0]?.confirmed ?? false);
+    setConfirmCheckbox(selectedItems[0]?.confirmed ?? false);
+    setBomUnlockedForEdit(false);
+    setEditorValidationError(null);
+  }, [modelId, size, stage, bom]);
+
+  const isBomEditable = !selectedBomConfirmed || bomUnlockedForEdit;
+
+  function updateRow(id: string, patch: Partial<EditableBomRow>) {
+    setBomEditorRows((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, ...patch } : r))
+    );
+    setEditorValidationError(null);
+  }
+
+  function removeRow(id: string) {
+    setBomEditorRows((prev) => prev.filter((r) => r.id !== id));
+  }
+
+  function addRow() {
+    setBomEditorRows((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID?.() ?? `new-${Date.now()}`,
+        length_mm: 0,
+        tap: false,
+        qty: 1,
+      },
+    ]);
+    setEditorValidationError(null);
+  }
+
+  async function handleSave() {
+    const invalid = bomEditorRows.some(
+      (r) => !(r.length_mm > 0 && r.qty > 0)
+    );
+    if (invalid) {
+      setEditorValidationError("長さ・必要本数は 1 以上を入力してください。");
+      return;
+    }
+    setEditorValidationError(null);
+    await onSaveSelectedBom(modelId, size, stage, bomEditorRows, confirmCheckbox);
+  }
+
+  function handleUnlock() {
+    if (
+      window.confirm(
+        "この BOM は確定済みです。ロックを解除して編集しますか？"
+      )
+    ) {
+      setBomUnlockedForEdit(true);
+    }
+  }
 
   async function handleApplyTemplate() {
     setTemplateMessage(null);
@@ -1488,111 +1560,176 @@ function BomPanel({
           </select>
         </label>
         <label style={selectLabel}>
-          段数（候補 1～5、手入力可）
-          <input
-            type="number"
-            min={1}
+          段数
+          <select
             value={stage}
             onChange={(e) =>
-              setStage(parseInt(e.target.value || "1", 10))
+              setStage(parseInt(e.target.value || "1", 10) || 1)
             }
-            list="bom-stage-list"
-            style={bigInput}
-            className="field-large"
-          />
-          <datalist id="bom-stage-list">
-            {STAGE_OPTIONS.map((s) => (
-              <option key={s} value={s} />
-            ))}
-          </datalist>
-        </label>
-        <label style={selectLabel}>
-          部材長さ
-          <input
-            type="number"
-            min={1}
-            value={lengthMm}
-            onChange={(e) =>
-              setLengthMm(parseInt(e.target.value || "205", 10))
-            }
-            list="bom-length-list"
-            style={bigInput}
-            className="field-large"
-          />
-          <datalist id="bom-length-list">
-            {LENGTH_OPTIONS.map((L) => (
-              <option key={L} value={L} />
-            ))}
-          </datalist>
-        </label>
-        <label style={selectLabel}>
-          TAP
-          <select
-            value={tap ? "1" : "0"}
-            onChange={(e) => setTap(e.target.value === "1")}
             style={bigSelect}
             className="field-large"
           >
-            <option value="0">TAP無</option>
-            <option value="1">TAP有</option>
+            {STAGE_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}段
+              </option>
+            ))}
           </select>
         </label>
-        <label style={selectLabel}>
-          必要本数
-          <input
-            type="number"
-            min={1}
-            value={qtyPerUnit}
-            onChange={(e) =>
-              setQtyPerUnit(parseInt(e.target.value || "1", 10))
-            }
-            style={bigInput}
-            className="field-large"
-          />
-        </label>
-        <button
-          onClick={handleSubmit}
-          disabled={savingInProgress}
-          style={secondaryButton}
-        >
-          {savingInProgress ? "保存中..." : "追加/更新"}
-        </button>
       </div>
-      <table style={table}>
-        <thead>
-          <tr>
-            <th style={tableHeaderCell}>モデル</th>
-            <th style={tableHeaderCell}>ラックサイズ</th>
-            <th style={tableHeaderCell}>段数</th>
-            <th style={tableHeaderCell}>部材サイズ</th>
-            <th style={tableHeaderCell}>TAP</th>
-            <th style={tableHeaderCellRight}>必要本数</th>
-            <th style={tableHeaderCell}></th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((r) => (
-            <tr key={`${r.model_id}-${r.size}-${r.stage}-${r.length_mm}-${r.tap}`} className="data-row">
-              <td style={tableCell}>{r.model}</td>
-              <td style={tableCell}>{r.size}</td>
-              <td style={tableCell}>{r.stage}</td>
-              <td style={tableCell}>■13x{r.length_mm}</td>
-              <td style={tableCell}>{r.tap ? "TAP有" : "TAP無"}</td>
-              <td style={tableCellRight}>{r.qty_per_unit}</td>
-              <td style={tableCell}>
-                <button
-                  type="button"
-                  onClick={() => onDelete(r)}
-                  disabled={savingInProgress}
-                  style={{ ...secondaryButton, padding: "4px 10px", fontSize: 12 }}
-                >
-                  削除
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+
+      {selectedBomConfirmed && !bomUnlockedForEdit ? (
+        <div
+          style={{
+            padding: 12,
+            marginBottom: 12,
+            background: "#fef3c7",
+            border: "1px solid #f59e0b",
+            borderRadius: 8,
+            fontSize: 14,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>確定済み（ロック中）</div>
+          <div style={{ marginBottom: 8 }}>
+            この BOM は確定済みです。編集するにはロック解除が必要です。
+          </div>
+          <button type="button" onClick={handleUnlock} style={secondaryButton}>
+            ロック解除して編集
+          </button>
+        </div>
+      ) : (
+        <>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 14 }}>
+            <input
+              type="checkbox"
+              checked={confirmCheckbox}
+              onChange={(e) => setConfirmCheckbox(e.target.checked)}
+              disabled={!isBomEditable}
+            />
+            この BOM を確定する
+          </label>
+          {editorValidationError && (
+            <div
+              style={{
+                padding: 10,
+                marginBottom: 12,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: 6,
+                color: "#b91c1c",
+                fontSize: 13,
+              }}
+            >
+              {editorValidationError}
+            </div>
+          )}
+          {bomEditorRows.length === 0 ? (
+            <div
+              style={{
+                padding: 16,
+                marginBottom: 12,
+                background: "#f3f4f6",
+                borderRadius: 8,
+                color: "#6b7280",
+                fontSize: 14,
+              }}
+            >
+              この組み合わせのBOMは未登録です。行を追加して登録してください。
+            </div>
+          ) : null}
+          <table style={table}>
+            <thead>
+              <tr>
+                <th style={tableHeaderCell}>長さ</th>
+                <th style={tableHeaderCell}>TAP</th>
+                <th style={tableHeaderCellRight}>必要本数</th>
+                <th style={tableHeaderCell}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {bomEditorRows.map((r) => (
+                <tr key={r.id}>
+                  <td style={tableCell}>
+                    <input
+                      type="number"
+                      min={1}
+                      value={r.length_mm === 0 ? "" : r.length_mm}
+                      onChange={(e) =>
+                        updateRow(r.id, {
+                          length_mm: e.target.value === "" ? 0 : parseInt(e.target.value, 10) || 0,
+                        })
+                      }
+                      disabled={!isBomEditable}
+                      style={{ ...bigInput, width: 90 }}
+                      placeholder="長さ"
+                    />
+                  </td>
+                  <td style={tableCell}>
+                    <select
+                      value={r.tap ? "1" : "0"}
+                      onChange={(e) =>
+                        updateRow(r.id, { tap: e.target.value === "1" })
+                      }
+                      disabled={!isBomEditable}
+                      style={{ ...bigSelect, minWidth: 80 }}
+                    >
+                      <option value="0">TAP無</option>
+                      <option value="1">TAP有</option>
+                    </select>
+                  </td>
+                  <td style={tableCellRight}>
+                    <input
+                      type="number"
+                      min={1}
+                      value={r.qty === 0 ? "" : r.qty}
+                      onChange={(e) =>
+                        updateRow(r.id, {
+                          qty: e.target.value === "" ? 0 : parseInt(e.target.value, 10) || 0,
+                        })
+                      }
+                      disabled={!isBomEditable}
+                      style={{ ...bigInput, width: 80 }}
+                      placeholder="本数"
+                    />
+                  </td>
+                  <td style={tableCell}>
+                    <button
+                      type="button"
+                      onClick={() => removeRow(r.id)}
+                      disabled={!isBomEditable || savingInProgress}
+                      style={{
+                        ...secondaryButton,
+                        padding: "4px 10px",
+                        fontSize: 12,
+                      }}
+                    >
+                      削除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 12, display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={addRow}
+              disabled={!isBomEditable || savingInProgress}
+              style={secondaryButton}
+            >
+              行追加
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={savingInProgress}
+              style={primaryButton}
+            >
+              {savingInProgress ? "保存中..." : "保存"}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

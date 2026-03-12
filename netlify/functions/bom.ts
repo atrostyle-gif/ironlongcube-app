@@ -16,6 +16,7 @@ type BomItem = {
   length_mm: number;
   tap: boolean;
   qty_per_unit: number;
+  confirmed?: boolean;
 };
 
 /** 既存データ互換: 読込時 tap が無ければ screw を tap として扱う */
@@ -127,6 +128,8 @@ export const handler: Handler = async (event) => {
             length_mm: row.length_mm,
             tap: normalizeTap(row as { tap?: boolean; screw?: boolean }),
             qty_per_unit: row.qty_per_unit,
+            confirmed:
+              typeof row.confirmed === "boolean" ? row.confirmed : false,
           } as BomItem;
         });
       return {
@@ -183,15 +186,20 @@ export const handler: Handler = async (event) => {
               typeof (i as { screw?: boolean }).screw === "boolean") &&
             typeof (i as BomItem).qty_per_unit === "number"
         )
-        .map((i: Record<string, unknown>) => ({
-          model_id: (i as BomItem).model_id,
-          model: (i as BomItem).model,
-          size: (i as BomItem).size,
-          stage: (i as BomItem).stage,
-          length_mm: (i as BomItem).length_mm,
-          tap: normalizeTap(i as { tap?: boolean; screw?: boolean }),
-          qty_per_unit: (i as BomItem).qty_per_unit,
-        })) as BomItem[];
+        .map((i: Record<string, unknown>) => {
+          const row = i as BomItem & { confirmed?: boolean };
+          return {
+            model_id: row.model_id,
+            model: row.model,
+            size: row.size,
+            stage: row.stage,
+            length_mm: row.length_mm,
+            tap: normalizeTap(i as { tap?: boolean; screw?: boolean }),
+            qty_per_unit: row.qty_per_unit,
+            confirmed:
+              typeof row.confirmed === "boolean" ? row.confirmed : false,
+          } as BomItem;
+        }) as BomItem[];
     } catch (parseErr) {
       console.error("bom POST: invalid JSON body", parseErr);
       return {
