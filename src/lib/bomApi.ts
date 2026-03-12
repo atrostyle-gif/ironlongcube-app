@@ -8,7 +8,7 @@ export type BomItem = {
   size: string;
   stage: number;
   length_mm: number;
-  screw: boolean;
+  tap: boolean;
   qty_per_unit: number;
 };
 
@@ -64,7 +64,7 @@ export function sortBomItems(items: BomItem[]): BomItem[] {
       (SIZE_ORDER[a.size] ?? 99) - (SIZE_ORDER[b.size] ?? 99) ||
       a.stage - b.stage ||
       a.length_mm - b.length_mm ||
-      Number(a.screw) - Number(b.screw)
+      Number(a.tap) - Number(b.tap)
   );
 }
 
@@ -79,12 +79,20 @@ export function hasBomForSelection(
   );
 }
 
+/** 既存データ互換: tap が無ければ screw を tap として読む */
+function normalizeTapFromRaw(raw: { tap?: boolean; screw?: boolean }): boolean {
+  if (typeof raw.tap === "boolean") return raw.tap;
+  if (typeof raw.screw === "boolean") return raw.screw;
+  return false;
+}
+
 function normalizeItem(raw: {
   model_id?: string;
   model?: string;
   size?: string;
   stage?: number;
   length_mm?: number;
+  tap?: boolean;
   screw?: boolean;
   qty_per_unit?: number;
 }): BomItem {
@@ -101,7 +109,7 @@ function normalizeItem(raw: {
     size,
     stage: Number(raw.stage) || 1,
     length_mm: Number(raw.length_mm) || 205,
-    screw: Boolean(raw.screw),
+    tap: normalizeTapFromRaw(raw),
     qty_per_unit: Number(raw.qty_per_unit) || 0,
   };
 }

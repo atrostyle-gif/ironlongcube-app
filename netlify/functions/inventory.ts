@@ -11,9 +11,16 @@ const DROPBOX_PATH = "/inventory.json";
 
 type InvItem = {
   length_mm: number;
-  screw: boolean;
+  tap: boolean;
   qty_on_hand: number;
 };
+
+/** 既存データ互換: 読込時 tap が無ければ screw を tap として扱う */
+function normalizeTap(item: { tap?: boolean; screw?: boolean }): boolean {
+  if (typeof item.tap === "boolean") return item.tap;
+  if (typeof item.screw === "boolean") return item.screw;
+  return false;
+}
 
 const jsonHeaders = {
   "Content-Type": "application/json",
@@ -111,7 +118,14 @@ export const handler: Handler = async (event) => {
         };
       }
 
-      const items = Array.isArray(parsed?.items) ? parsed.items : [];
+      const rawItems = Array.isArray(parsed?.items) ? parsed.items : [];
+      const items: InvItem[] = rawItems
+        .filter((i: unknown) => i != null && typeof i === "object")
+        .map((i: Record<string, unknown>) => ({
+          length_mm: Number((i as InvItem).length_mm),
+          tap: normalizeTap(i as { tap?: boolean; screw?: boolean }),
+          qty_on_hand: Number((i as { qty_on_hand?: number }).qty_on_hand),
+        }));
       console.log("GET inventory ok");
       return {
         statusCode: 200,
@@ -152,9 +166,16 @@ export const handler: Handler = async (event) => {
       const body = event.body ?? "{}";
       const parsed = JSON.parse(body) as { items?: unknown };
       const rawItems = Array.isArray(parsed?.items) ? parsed.items : [];
-      items = rawItems.filter(
-        (i): i is InvItem => i != null && typeof i === "object"
-      ) as InvItem[];
+      items = rawItems
+        .filter((i: unknown) => i != null && typeof i === "object")
+        .map((i: Record<string, unknown>) => {
+          const row = i as { length_mm?: number; tap?: boolean; screw?: boolean; qty_on_hand?: number };
+          return {
+            length_mm: Number(row.length_mm),
+            tap: normalizeTap(row),
+            qty_on_hand: Number(row.qty_on_hand),
+          };
+        });
     } catch (parseErr) {
       console.error("inventory POST: invalid JSON body", parseErr);
       return {
@@ -164,9 +185,14 @@ export const handler: Handler = async (event) => {
       };
     }
     try {
+      const toSave = items.map(({ length_mm, tap, qty_on_hand }) => ({
+        length_mm,
+        tap,
+        qty_on_hand,
+      }));
       await dbx.filesUpload({
         path: DROPBOX_PATH,
-        contents: JSON.stringify({ items }, null, 2),
+        contents: JSON.stringify({ items: toSave }, null, 2),
         mode: { ".tag": "overwrite" },
       });
       console.log("POST inventory ok");

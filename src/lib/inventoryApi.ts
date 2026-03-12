@@ -1,9 +1,11 @@
+import { normalizeTap } from "./tapNormalize";
+
 // 相対パスのため netlify dev および本番デプロイどちらでも同一オリジンで動作
 const INVENTORY_API = "/.netlify/functions/inventory";
 
 export type InvItem = {
   length_mm: number;
-  screw: boolean;
+  tap: boolean;
   qty_on_hand: number;
 };
 
@@ -16,11 +18,11 @@ export async function fetchInventory(): Promise<InvItem[]> {
         `在庫の読み込みに失敗しました (${res.status})`
     );
   }
-  const data = (await res.json()) as { items?: InvItem[] };
+  const data = (await res.json()) as { items?: Array<{ length_mm?: number; tap?: boolean; screw?: boolean; qty_on_hand?: number }> };
   const items = Array.isArray(data?.items) ? data.items : [];
   return items.map((it) => ({
     length_mm: Number(it.length_mm),
-    screw: Boolean(it.screw),
+    tap: normalizeTap(it),
     qty_on_hand: Number(it.qty_on_hand),
   }));
 }

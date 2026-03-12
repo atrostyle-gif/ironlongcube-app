@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import {
   fetchBom,
@@ -23,17 +23,24 @@ import {
   type TemplateModelId,
   type TemplateSize,
 } from "./data/bomTemplates";
+import { postIssueCut, type IssueCutPart } from "./lib/issueCutApi";
+import type { ProductionItem } from "./types/cutIssue";
+import {
+  expandProductionList,
+  aggregateToNeedRows,
+  getPartWithBreakdown,
+  type NeedRowFromList,
+  type PartWithBreakdown,
+} from "./lib/productionList";
+import {
+  fetchDrawings,
+  uploadDrawing,
+  getDrawingFileUrl,
+  type Drawing,
+} from "./lib/drawingApi";
 
 const STAGE_OPTIONS = [1, 2, 3, 4, 5];
 const LENGTH_OPTIONS = [205, 231, 410, 436, 859, 1282, 1679, 1705, 2102, 2128];
-
-type NeedRow = {
-  length_mm: number;
-  screw: boolean;
-  required: number;
-  on_hand: number;
-  shortage: number;
-};
 
 export default function App() {
   // Inventory: inv = 一覧, 初回は fetchInventory(), 追加/更新で saveInventory() 後に setInv
@@ -59,6 +66,23 @@ export default function App() {
   const [units, setUnits] = useState(1);
 
   const [showShortageOnly, setShowShortageOnly] = useState(false);
+
+  const [productionList, setProductionList] = useState<ProductionItem[]>([]);
+
+  const [lastIssueId, setLastIssueId] = useState<string | null>(null);
+  const [lastIssueParts, setLastIssueParts] = useState<IssueCutPart[] | null>(
+    null
+  );
+  const [issueCutLoading, setIssueCutLoading] = useState(false);
+  const [issueCutError, setIssueCutError] = useState<string | null>(null);
+
+  const [drawings, setDrawings] = useState<Drawing[]>([]);
+  const [drawingUploading, setDrawingUploading] = useState(false);
+  const [drawingUploadError, setDrawingUploadError] = useState<string | null>(null);
+  const [uploadDrawingModelId, setUploadDrawingModelId] = useState<ModelId>("cube");
+  const [uploadDrawingSize, setUploadDrawingSize] = useState<BomSize>("200x200");
+  const [uploadDrawingStage, setUploadDrawingStage] = useState(1);
+  const drawingFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setInvLoadError(null);
@@ -89,6 +113,15 @@ export default function App() {
       })
       .finally(() => setBomLoading(false));
   }, []);
+
+  function loadDrawings() {
+    fetchDrawings()
+      .then(setDrawings)
+      .catch(() => setDrawings([]));
+  }
+  useEffect(() => {
+    if (tab === "make") loadDrawings();
+  }, [tab]);
 
   // -------------------------
   // 製作タブ: 候補生成（BOM から動的に）
@@ -132,6 +165,29 @@ export default function App() {
     return Array.from(set).sort((a, b) => a - b);
   }, [bom, modelId, size]);
 
+  const availableSizesForUpload = useMemo(() => {
+    const set = new Set<string>();
+    for (const b of bom) {
+      if (b.model_id === uploadDrawingModelId && b.size) {
+        set.add(b.size);
+      }
+    }
+    return BOM_SIZES.filter((s) => set.has(s));
+  }, [bom, uploadDrawingModelId]);
+
+  const availableStagesForUpload = useMemo(() => {
+    const set = new Set<number>();
+    for (const b of bom) {
+      if (
+        b.model_id === uploadDrawingModelId &&
+        b.size === uploadDrawingSize
+      ) {
+        set.add(b.stage);
+      }
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  }, [bom, uploadDrawingModelId, uploadDrawingSize]);
+
   // 選択値の自動補正
   useEffect(() => {
     if (bom.length === 0 || availableModels.length === 0) return;
@@ -160,87 +216,88 @@ export default function App() {
   const invMap = useMemo(() => {
     const m = new Map<string, number>();
     for (const it of inv) {
-      m.set(`${it.length_mm}|${it.screw ? 1 : 0}`, it.qty_on_hand);
+      m.set(`${it.length_mm}|${it.tap ? 1 : 0}`, it.qty_on_hand);
     }
     return m;
   }, [inv]);
 
   // -------------------------
-  // Calculate
+  // 製作予定リスト → 展開・合算
   // -------------------------
-  const needRows: NeedRow[] = useMemo(() => {
-    const filtered = bom.filter(
-      (b) =>
-        b.model_id === modelId && b.size === size && b.stage === stage
+  const expandedList = useMemo(
+    () =>
+      expandProductionList(productionList, bom, (id) =>
+        getModelLabel(id as ModelId)
+      ),
+    [productionList, bom]
+  );
+
+  const needRows: NeedRowFromList[] = useMemo(
+    () => aggregateToNeedRows(expandedList, invMap, showShortageOnly),
+    [expandedList, invMap, showShortageOnly]
+  );
+
+  const partWithBreakdown = useMemo(
+    () => getPartWithBreakdown(expandedList),
+    [expandedList]
+  );
+
+  const hasShortage = needRows.some((r) => r.shortage > 0);
+  const shortageKindCount = needRows.filter((r) => r.shortage > 0).length;
+  const shortageTotalQty = needRows.reduce((s, r) => s + r.shortage, 0);
+
+  function addToProductionList() {
+    const hasBom = bom.some(
+      (b) => b.model_id === modelId && b.size === size && b.stage === stage
     );
-
-    const reqMap = new Map<
-      string,
-      { length_mm: number; screw: boolean; required: number }
-    >();
-
-    for (const b of filtered) {
-      const key = `${b.length_mm}|${b.screw ? 1 : 0}`;
-      const add = b.qty_per_unit * units;
-
-      const prev = reqMap.get(key);
-      if (prev) prev.required += add;
-      else
-        reqMap.set(key, {
-          length_mm: b.length_mm,
-          screw: b.screw,
-          required: add,
-        });
-    }
-
-    const out: NeedRow[] = [];
-
-    for (const v of reqMap.values()) {
-      const onHand = invMap.get(
-        `${v.length_mm}|${v.screw ? 1 : 0}`
-      ) ?? 0;
-
-      const shortage = Math.max(v.required - onHand, 0);
-
-      if (showShortageOnly && shortage <= 0) continue;
-
-      out.push({
-        length_mm: v.length_mm,
-        screw: v.screw,
-        required: v.required,
-        on_hand: onHand,
-        shortage,
-      });
-    }
-
-    out.sort(
-      (a, b) =>
-        b.shortage - a.shortage ||
-        a.length_mm - b.length_mm ||
-        Number(a.screw) - Number(b.screw)
+    if (!hasBom) return;
+    const existing = productionList.findIndex(
+      (p) => p.model_id === modelId && p.size === size && p.stage === stage
     );
+    if (existing >= 0) {
+      setProductionList((prev) =>
+        prev.map((p, i) =>
+          i === existing ? { ...p, qty: p.qty + units } : p
+        )
+      );
+    } else {
+      setProductionList((prev) => [
+        ...prev,
+        { model_id: modelId, size, stage, qty: units },
+      ]);
+    }
+  }
 
-    return out;
-  }, [bom, invMap, modelId, size, stage, units, showShortageOnly]);
+  function removeFromProductionList(index: number) {
+    setProductionList((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  const drawingMap = useMemo(() => {
+    const m = new Map<string, Drawing>();
+    for (const d of drawings) {
+      m.set(`${d.model_id}|${d.size}|${d.stage}`, d);
+    }
+    return m;
+  }, [drawings]);
 
   const showBomWarning = bom.length === 0;
 
   async function updateInventory(
     length_mm: number,
-    screw: boolean,
+    tap: boolean,
     qty_on_hand: number
   ) {
     setSaveError(null);
     setSaveSuccessMessage(null);
     setSavingInProgress(true);
-    const key = `${length_mm}|${screw ? 1 : 0}`;
+    const key = `${length_mm}|${tap ? 1 : 0}`;
     const next = inv.filter(
-      (it) => `${it.length_mm}|${it.screw ? 1 : 0}` !== key
+      (it) => `${it.length_mm}|${it.tap ? 1 : 0}` !== key
     );
-    next.push({ length_mm, screw, qty_on_hand });
+    next.push({ length_mm, tap, qty_on_hand });
     next.sort(
       (a, b) =>
-        a.length_mm - b.length_mm || Number(a.screw) - Number(b.screw)
+        a.length_mm - b.length_mm || Number(a.tap) - Number(b.tap)
     );
     try {
       await saveInventory(next);
@@ -257,7 +314,7 @@ export default function App() {
   }
 
   function bomRowKey(item: BomItem): string {
-    return `${item.model_id}|${item.size}|${item.stage}|${item.length_mm}|${item.screw ? 1 : 0}`;
+    return `${item.model_id}|${item.size}|${item.stage}|${item.length_mm}|${item.tap ? 1 : 0}`;
   }
 
   async function addOrUpdateBom(item: BomItem) {
@@ -335,7 +392,7 @@ export default function App() {
       .filter((r) => r.shortage > 0)
       .map(
         (r) =>
-          `${r.length_mm}mm\t${r.screw ? "ネジ有" : "ネジ無"}\t${r.shortage}本`
+          `${r.length_mm}mm\t${r.tap ? "TAP有" : "TAP無"}\t${r.shortage}本`
       );
 
     const text = lines.length ? lines.join("\n") : "不足なし";
@@ -343,35 +400,122 @@ export default function App() {
     alert("コピーしました");
   }
 
+  function openCutSheetWithBreakdown(
+    parts: PartWithBreakdown[],
+    productName: string,
+    dateStr: string
+  ) {
+    const KERF_MM = 3;
+    let totalMm = 0;
+    const sections = parts
+      .map((p) => {
+        const total =
+          p.qty <= 0 ? 0 : p.length_mm * p.qty + KERF_MM * (p.qty - 1);
+        totalMm += total;
+        const tapLabel = p.tap ? "TAP有" : "TAP無";
+        const breakdownRows =
+          p.breakdown.length > 0
+            ? p.breakdown
+                .map(
+                  (b) =>
+                    `<tr class="breakdown-row"><td colspan="2"></td><td class="breakdown-cell" colspan="4">${b.label}: ${b.qty}本</td></tr>`
+                )
+                .join("")
+            : "";
+        return `<tr class="part-header"><td>${p.length_mm}mm</td><td>${tapLabel}</td><td colspan="2">${p.qty}本</td><td>${p.tap ? "MC (TAP加工)" : "溶接"}</td><td class="total-length">${total}</td></tr>${breakdownRows}`;
+      })
+      .join("");
+
+    const html = `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>切断指示書（長さ別まとめ）</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: sans-serif; margin: 0; padding: 15mm; font-size: 16px; }
+  .toolbar { margin-bottom: 12px; }
+  .toolbar button { padding: 8px 16px; font-size: 15px; cursor: pointer; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; font-size: 17px; flex-wrap: wrap; gap: 8px; }
+  .product { font-weight: 600; font-size: 1.4rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  th, td { border: 1px solid #333; padding: 8px 10px; text-align: left; }
+  th { background: #eee; font-weight: 600; text-align: center; }
+  .part-header { background: #fff; font-weight: 600; }
+  .breakdown-row { background: #f9f9f9; }
+  .breakdown-cell { font-size: 13px; color: #444; padding-left: 24px; }
+  .total-length { text-align: right; white-space: nowrap; }
+  @media print { .toolbar { display: none !important; }
+    @page { size: A4 landscape; margin: 15mm; }
+    body { font-family: sans-serif; }
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar"><button type="button" onclick="window.print()">印刷</button></div>
+  <div class="header">
+    <span class="product">品名：${productName}</span>
+    <span>発注日：${dateStr}</span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>長さ</th><th>TAP</th><th>本数</th><th></th><th>次工程</th><th>総長(mm)</th>
+      </tr>
+    </thead>
+    <tbody>${sections}</tbody>
+    <tfoot>
+      <tr><td colspan="5" style="text-align: right; font-weight: 600;">総長合計</td><td class="total-length" style="font-weight: 600;">${totalMm}</td></tr>
+    </tfoot>
+  </table>
+</body>
+</html>`;
+
+    const w = window.open("", "_blank");
+    if (!w) {
+      alert("ポップアップがブロックされています。別ウィンドウで開くには許可してください。");
+      return;
+    }
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+  }
+
   function printCutSheet() {
-    const rows = needRows;
+    if (productionList.length === 0) {
+      alert("製作予定を追加してください");
+      return;
+    }
     const today = new Date();
     const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
-    const productName = `${getModelLabel(modelId)} ${size} ${stage}段`;
+    const productName = "製作予定一括 切断指示書";
+    openCutSheetWithBreakdown(partWithBreakdown, productName, dateStr);
+  }
 
-    const KERF_MM = 3;
-    let initialTotalMm = 0;
-    const tableRows = rows
-      .map(
-        (r, i) => {
-          const totalMm =
-            r.shortage <= 0
-              ? 0
-              : r.length_mm * r.shortage + KERF_MM * (r.shortage - 1);
-          initialTotalMm += totalMm;
-          const requiredPerUnit = units > 0 ? Math.round(r.required / units) : r.required;
-          return `<tr data-length-mm="${r.length_mm}" data-required-per-unit="${requiredPerUnit}">
-            <td>${i + 1}</td>
-            <td>SS黒皮</td>
-            <td>■13x${r.length_mm}</td>
-            <td class="editable-required" contenteditable="true">${r.required}</td>
-            <td class="editable-onhand" contenteditable="true">${r.on_hand}</td>
-            <td class="cut-qty calc-shortage">${r.shortage}</td>
-            <td>${r.screw ? "MC (TAP加工)" : "溶接"}</td>
-            <td class="total-length calc-total">${totalMm}</td>
-          </tr>`;
-        }
-      )
+  const KERF_MM = 3;
+  function openCutSheetFromParts(
+    parts: IssueCutPart[],
+    productName: string,
+    dateStr: string,
+    unitsVal: number
+  ) {
+    let totalMm = 0;
+    const rows = parts
+      .map((p, i) => {
+        const total =
+          p.qty <= 0 ? 0 : p.length_mm * p.qty + KERF_MM * (p.qty - 1);
+        totalMm += total;
+        return `<tr>
+          <td>${i + 1}</td>
+          <td>SS黒皮</td>
+          <td>■13x${p.length_mm}</td>
+          <td>0</td>
+          <td>0</td>
+          <td class="cut-qty">${p.qty}</td>
+          <td>${p.tap ? "MC (TAP加工)" : "溶接"}</td>
+          <td class="total-length">${total}</td>
+        </tr>`;
+      })
       .join("");
 
     const html = `<!DOCTYPE html>
@@ -386,8 +530,6 @@ export default function App() {
   .toolbar button { padding: 8px 16px; font-size: 15px; cursor: pointer; }
   .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; font-size: 17px; flex-wrap: wrap; gap: 8px; }
   .product { font-weight: 600; font-size: 1.4rem; }
-  .header-units { display: flex; align-items: center; gap: 6px; }
-  .header-units [contenteditable="true"] { min-width: 2.5em; text-align: right; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
   th, td { border: 1px solid #333; padding: 8px 10px; text-align: left; }
   th:nth-child(1), td:nth-child(1) { width: 5%; }
@@ -403,96 +545,31 @@ export default function App() {
   tbody tr:nth-child(odd) { background: #fff; }
   td:nth-child(1), td:nth-child(4), td:nth-child(5), td:nth-child(6), td:nth-child(7), td:nth-child(8) { text-align: right; }
   .total-length { white-space: nowrap; text-align: right; }
-  [contenteditable="true"] { outline: 1px dotted #999; }
-  @media print {
-    .toolbar { display: none !important; }
+  @media print { .toolbar { display: none !important; }
     @page { size: A4 landscape; margin: 15mm; }
     body { font-family: sans-serif; }
-    [contenteditable="true"] { outline: none; }
     tbody tr:nth-child(even) { background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   }
 </style>
 </head>
 <body>
-  <div class="toolbar">
-    <button type="button" onclick="window.print()">印刷</button>
-  </div>
+  <div class="toolbar"><button type="button" onclick="window.print()">印刷</button></div>
   <div class="header">
     <span class="product">品名：${productName}</span>
-    <span class="header-units">製作台数：<span id="units-input" contenteditable="true">${units}</span>台</span>
+    <span>製作台数：${unitsVal}台</span>
     <span>発注日：${dateStr}</span>
   </div>
   <table>
     <thead>
       <tr>
-        <th>No</th>
-        <th>材種</th>
-        <th>サイズ</th>
-        <th>必要数</th>
-        <th>在庫数</th>
-        <th class="cut-qty">切断数</th>
-        <th>次工程</th>
-        <th class="total-length">総長(mm)</th>
+        <th>No</th><th>材種</th><th>サイズ</th><th>必要数</th><th>在庫数</th><th class="cut-qty">切断数</th><th>次工程</th><th class="total-length">総長(mm)</th>
       </tr>
     </thead>
-    <tbody>${tableRows.length ? tableRows : "<tr><td colspan=\"8\">切断必要なし</td></tr>"}</tbody>
+    <tbody>${rows}</tbody>
     <tfoot>
-      <tr class="total-row">
-        <td colspan="7" style="text-align: right; font-weight: 600;">総長合計</td>
-        <td id="total-length-sum" class="total-length" style="font-weight: 600;">${initialTotalMm}</td>
-      </tr>
+      <tr><td colspan="7" style="text-align: right; font-weight: 600;">総長合計</td><td class="total-length" style="font-weight: 600;">${totalMm}</td></tr>
     </tfoot>
   </table>
-  <script>
-    (function() {
-      var KERF = 3;
-      function updateTotalLength() {
-        var sum = 0;
-        [].forEach.call(document.querySelectorAll(".calc-total"), function(td) {
-          sum += parseInt(td.textContent.trim(), 10) || 0;
-        });
-        var el = document.getElementById("total-length-sum");
-        if (el) el.textContent = sum;
-      }
-      function recalcRow(tr) {
-        var len = parseInt(tr.getAttribute("data-length-mm"), 10);
-        if (isNaN(len)) return;
-        var reqCell = tr.querySelector(".editable-required");
-        if (!reqCell) return;
-        var required = parseInt(reqCell.textContent.trim(), 10) || 0;
-        var onhand = parseInt(tr.querySelector(".editable-onhand").textContent.trim(), 10) || 0;
-        var shortage = Math.max(0, required - onhand);
-        var total = shortage <= 0 ? 0 : len * shortage + KERF * (shortage - 1);
-        tr.querySelector(".calc-shortage").textContent = shortage;
-        tr.querySelector(".calc-total").textContent = total;
-        updateTotalLength();
-      }
-      function recalcAllFromUnits() {
-        var u = parseInt(document.getElementById("units-input").textContent.trim(), 10) || 0;
-        var per = Math.max(0, u);
-        [].forEach.call(document.querySelectorAll("tr[data-required-per-unit]"), function(tr) {
-          var rpu = parseInt(tr.getAttribute("data-required-per-unit"), 10) || 0;
-          tr.querySelector(".editable-required").textContent = rpu * per;
-          recalcRow(tr);
-        });
-        updateTotalLength();
-      }
-      function init() {
-        var tbody = document.querySelector("table tbody");
-        if (!tbody) return;
-        [].forEach.call(tbody.querySelectorAll("tr[data-length-mm]"), function(tr) {
-          [].forEach.call(tr.querySelectorAll(".editable-required, .editable-onhand"), function(cell) {
-            cell.addEventListener("input", function() { recalcRow(tr); });
-          });
-        });
-        var unitsEl = document.getElementById("units-input");
-        if (unitsEl) unitsEl.addEventListener("input", recalcAllFromUnits);
-        updateTotalLength();
-      }
-      if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-      else init();
-    })();
-  </script>
 </body>
 </html>`;
 
@@ -504,6 +581,37 @@ export default function App() {
     w.document.write(html);
     w.document.close();
     w.focus();
+  }
+
+  async function confirmAndPrintCutSheet() {
+    if (productionList.length === 0) return;
+    setIssueCutError(null);
+    setIssueCutLoading(true);
+    const productName = "製作予定一括 切断指示確定";
+    const partsSnapshot = [...partWithBreakdown];
+    try {
+      const res = await postIssueCut(productionList);
+      setLastIssueId(res.issue_id);
+      setLastIssueParts(res.parts);
+      const today = new Date();
+      const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
+      openCutSheetWithBreakdown(partsSnapshot, productName, dateStr);
+      await fetchInventory().then(setInv).catch(() => {});
+      setProductionList([]);
+    } catch (err) {
+      setIssueCutError((err as Error)?.message ?? "切断指示の確定に失敗しました");
+    } finally {
+      setIssueCutLoading(false);
+    }
+  }
+
+  function reprintCutSheet() {
+    if (!lastIssueParts?.length) return;
+    const productName = lastIssueId ? `再印刷 ${lastIssueId}` : "再印刷";
+    const today = new Date();
+    const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
+    const totalUnits = lastIssueParts.reduce((s, p) => s + p.qty, 0);
+    openCutSheetFromParts(lastIssueParts, productName, dateStr, totalUnits);
   }
 
   return (
@@ -649,6 +757,190 @@ export default function App() {
                 className="field-large"
               />
             </label>
+            <button
+              onClick={addToProductionList}
+              disabled={
+                availableModels.length === 0 ||
+                !bom.some(
+                  (b) =>
+                    b.model_id === modelId &&
+                    b.size === size &&
+                    b.stage === stage
+                )
+              }
+              style={primaryButton}
+            >
+              製作予定に追加
+            </button>
+          </div>
+
+          {productionList.length > 0 && (
+            <div style={{ marginTop: 16, marginBottom: 16 }}>
+              <h4 style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
+                製作予定リスト
+              </h4>
+              <table style={table}>
+                <thead>
+                  <tr>
+                    <th style={tableHeaderCell}>製作品</th>
+                    <th style={tableHeaderCellRight}>台数</th>
+                    <th style={tableHeaderCell}>図面</th>
+                    <th style={tableHeaderCell}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productionList.map((p, i) => {
+                    const drawing = drawingMap.get(`${p.model_id}|${p.size}|${p.stage}`);
+                    return (
+                      <tr key={`${p.model_id}-${p.size}-${p.stage}-${i}`} className="data-row">
+                        <td style={tableCell}>
+                          {getModelLabel(p.model_id as ModelId)} / {p.size} / {p.stage}段
+                        </td>
+                        <td style={tableCellRight}>{p.qty}台</td>
+                        <td style={tableCell}>
+                          {drawing ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                window.open(getDrawingFileUrl(drawing.drawing_path), "_blank")
+                              }
+                              style={{
+                                ...secondaryButton,
+                                padding: "4px 10px",
+                                fontSize: 12,
+                              }}
+                            >
+                              図面確認
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: 12, color: "#888" }}>図面なし</span>
+                          )}
+                        </td>
+                        <td style={tableCell}>
+                          <button
+                            type="button"
+                            onClick={() => removeFromProductionList(i)}
+                            style={{
+                              ...secondaryButton,
+                              padding: "4px 10px",
+                              fontSize: 12,
+                            }}
+                          >
+                            削除
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div style={{ marginTop: 20, marginBottom: 16, padding: 16, background: "#f8fafc", borderRadius: 8 }}>
+            <h4 style={{ marginBottom: 12, fontSize: 14, fontWeight: 600 }}>図面アップロード</h4>
+            <div style={{ ...filterRow, flexWrap: "wrap" }}>
+              <label style={selectLabel}>
+                モデル
+                <select
+                  value={uploadDrawingModelId}
+                  onChange={(e) =>
+                    setUploadDrawingModelId((e.target.value as ModelId) || "cube")
+                  }
+                  style={bigSelect}
+                  className="field-large"
+                  disabled={availableModels.length === 0}
+                >
+                  {availableModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={selectLabel}>
+                サイズ
+                <select
+                  value={uploadDrawingSize}
+                  onChange={(e) =>
+                    setUploadDrawingSize((e.target.value as BomSize) || "200x200")
+                  }
+                  style={bigSelect}
+                  className="field-large"
+                  disabled={availableSizesForUpload.length === 0}
+                >
+                  {availableSizesForUpload.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={selectLabel}>
+                段数
+                <select
+                  value={uploadDrawingStage}
+                  onChange={(e) =>
+                    setUploadDrawingStage(parseInt(e.target.value, 10) || 1)
+                  }
+                  style={bigSelect}
+                  className="field-large"
+                  disabled={availableStagesForUpload.length === 0}
+                >
+                  {availableStagesForUpload.map((s) => (
+                    <option key={s} value={s}>
+                      {s}段
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label style={selectLabel}>
+                ファイル（PDF / PNG / JPG）
+                <input
+                  ref={drawingFileInputRef}
+                  type="file"
+                  accept=".pdf,.png,.jpg,.jpeg"
+                  style={{ fontSize: 14 }}
+                />
+              </label>
+              <div style={{ alignSelf: "flex-end" }}>
+                <button
+                  type="button"
+                  disabled={drawingUploading || availableModels.length === 0}
+                  onClick={async () => {
+                    const file = drawingFileInputRef.current?.files?.[0];
+                    if (!file) {
+                      setDrawingUploadError("ファイルを選択してください");
+                      return;
+                    }
+                    setDrawingUploadError(null);
+                    setDrawingUploading(true);
+                    try {
+                      await uploadDrawing(
+                        uploadDrawingModelId,
+                        uploadDrawingSize,
+                        uploadDrawingStage,
+                        file
+                      );
+                      loadDrawings();
+                      drawingFileInputRef.current && (drawingFileInputRef.current.value = "");
+                    } catch (err) {
+                      setDrawingUploadError((err as Error)?.message ?? "アップロードに失敗しました");
+                    } finally {
+                      setDrawingUploading(false);
+                    }
+                  }}
+                  style={primaryButton}
+                >
+                  {drawingUploading ? "アップロード中..." : "図面アップロード"}
+                </button>
+              </div>
+            </div>
+            {drawingUploadError && (
+              <div style={{ marginTop: 8, fontSize: 13, color: "#b91c1c" }}>
+                {drawingUploadError}
+              </div>
+            )}
           </div>
 
           <div style={toolbarRow}>
@@ -664,7 +956,7 @@ export default function App() {
               不足のみ表示
             </label>
 
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
                 onClick={copyCutList}
                 style={primaryButton}
@@ -677,8 +969,47 @@ export default function App() {
               >
                 印刷用切断指示書
               </button>
+              <button
+                onClick={confirmAndPrintCutSheet}
+                disabled={
+                  issueCutLoading ||
+                  productionList.length === 0 ||
+                  hasShortage
+                }
+                style={primaryButton}
+              >
+                {issueCutLoading ? "処理中..." : "切断指示を確定して印刷"}
+              </button>
+              <button
+                onClick={reprintCutSheet}
+                disabled={!lastIssueParts?.length}
+                style={secondaryButton}
+              >
+                切断指示を再印刷
+              </button>
+              {lastIssueId && (
+                <span style={{ fontSize: 12, color: "#666", alignSelf: "center" }}>
+                  確定済み: {lastIssueId}
+                </span>
+              )}
             </div>
           </div>
+
+          {issueCutError && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 10,
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                borderRadius: 6,
+                color: "#b91c1c",
+                fontSize: 13,
+              }}
+            >
+              {issueCutError}
+            </div>
+          )}
 
           {showBomWarning ? (
             <div
@@ -696,47 +1027,92 @@ export default function App() {
               BOMが登録されていません
             </div>
           ) : (
-            <table style={table}>
-              <thead>
-                <tr>
-                  <th style={tableHeaderCell}>長さ</th>
-                  <th style={tableHeaderCell}>ネジ</th>
-                  <th style={tableHeaderCellRight}>必要</th>
-                  <th style={tableHeaderCellRight}>在庫</th>
-                  <th style={tableHeaderCellRight}>切る必要</th>
-                </tr>
-              </thead>
-              <tbody>
-                {needRows.map((r) => {
-                  const hasSurplus =
-                    r.shortage === 0 && r.on_hand >= r.required;
-                  return (
-                    <tr
-                      key={`${r.length_mm}-${r.screw}`}
-                      className="data-row"
-                      style={
-                        hasSurplus ? rowSurplus : undefined
-                      }
-                    >
-                      <td style={tableCell}>{r.length_mm}mm</td>
-                      <td style={tableCell}>{r.screw ? "有" : "無"}</td>
-                      <td style={tableCellRight}>{r.required}</td>
-                      <td style={tableCellRight}>{r.on_hand}</td>
-                      <td
-                        style={{
-                          ...tableCellRight,
-                          ...(r.shortage > 0
-                            ? shortageCell
-                            : shortageZeroCell),
-                        }}
+            <>
+              {productionList.length > 0 && (shortageKindCount > 0 || shortageTotalQty > 0) && (
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: 10,
+                    background: "#fef2f2",
+                    border: "1px solid #fecaca",
+                    borderRadius: 6,
+                    color: "#b91c1c",
+                    fontSize: 13,
+                  }}
+                >
+                  不足部材種類数: {shortageKindCount} / 不足合計本数: {shortageTotalQty}
+                  {hasShortage && (
+                    <span style={{ display: "block", marginTop: 4 }}>
+                      在庫が不足しているため確定できません。
+                    </span>
+                  )}
+                </div>
+              )}
+              <table style={table}>
+                <thead>
+                  <tr>
+                    <th style={tableHeaderCell}>長さ</th>
+                    <th style={tableHeaderCell}>TAP</th>
+                    <th style={tableHeaderCellRight}>必要数</th>
+                    <th style={tableHeaderCellRight}>在庫数</th>
+                    <th style={tableHeaderCellRight}>差分</th>
+                    <th style={tableHeaderCellRight}>不足数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {needRows.map((r) => {
+                    const hasSurplus =
+                      r.shortage === 0 && r.on_hand >= r.required;
+                    return (
+                      <tr
+                        key={`${r.length_mm}-${r.tap}`}
+                        className="data-row"
+                        style={
+                          hasSurplus ? rowSurplus : undefined
+                        }
                       >
-                        {r.shortage}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        <td style={tableCell}>{r.length_mm}mm</td>
+                        <td style={tableCell}>{r.tap ? "TAP有" : "TAP無"}</td>
+                        <td style={tableCellRight}>{r.required}</td>
+                        <td style={tableCellRight}>{r.on_hand}</td>
+                        <td style={tableCellRight}>{r.diff}</td>
+                        <td
+                          style={{
+                            ...tableCellRight,
+                            ...(r.shortage > 0
+                              ? shortageCell
+                              : shortageZeroCell),
+                          }}
+                        >
+                          {r.shortage}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {productionList.length > 0 && partWithBreakdown.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <h4 style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
+                    切断指示プレビュー（長さ別まとめ）
+                  </h4>
+                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: 14 }}>
+                    {partWithBreakdown.map((p) => (
+                      <li key={`${p.length_mm}-${p.tap}`}>
+                        {p.length_mm}mm / {p.tap ? "TAP有" : "TAP無"} × {p.qty}本
+                        {p.breakdown.length > 0 && (
+                          <ul style={{ marginTop: 4, paddingLeft: 16, fontSize: 13, color: "#555" }}>
+                            {p.breakdown.map((b) => (
+                              <li key={b.label}>{b.label}: {b.qty}本</li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
           )}
         </>
       ) : tab === "inv" ? (
@@ -868,7 +1244,7 @@ function BomPanel({
   const [size, setSize] = useState("200x200");
   const [stage, setStage] = useState(1);
   const [lengthMm, setLengthMm] = useState(205);
-  const [screw, setScrew] = useState(false);
+  const [tap, setTap] = useState(false);
   const [qtyPerUnit, setQtyPerUnit] = useState(1);
 
   const [templateModelId, setTemplateModelId] =
@@ -888,7 +1264,7 @@ function BomPanel({
       size,
       stage,
       length_mm: lengthMm,
-      screw,
+      tap,
       qty_per_unit: qty,
     });
   };
@@ -1064,15 +1440,15 @@ function BomPanel({
           </datalist>
         </label>
         <label style={selectLabel}>
-          ネジ
+          TAP
           <select
-            value={screw ? "1" : "0"}
-            onChange={(e) => setScrew(e.target.value === "1")}
+            value={tap ? "1" : "0"}
+            onChange={(e) => setTap(e.target.value === "1")}
             style={bigSelect}
             className="field-large"
           >
-            <option value="0">無</option>
-            <option value="1">有</option>
+            <option value="0">TAP無</option>
+            <option value="1">TAP有</option>
           </select>
         </label>
         <label style={selectLabel}>
@@ -1103,19 +1479,19 @@ function BomPanel({
             <th style={tableHeaderCell}>ラックサイズ</th>
             <th style={tableHeaderCell}>段数</th>
             <th style={tableHeaderCell}>部材サイズ</th>
-            <th style={tableHeaderCell}>ネジ</th>
+            <th style={tableHeaderCell}>TAP</th>
             <th style={tableHeaderCellRight}>必要本数</th>
             <th style={tableHeaderCell}></th>
           </tr>
         </thead>
         <tbody>
           {sorted.map((r) => (
-            <tr key={`${r.model_id}-${r.size}-${r.stage}-${r.length_mm}-${r.screw}`} className="data-row">
+            <tr key={`${r.model_id}-${r.size}-${r.stage}-${r.length_mm}-${r.tap}`} className="data-row">
               <td style={tableCell}>{r.model}</td>
               <td style={tableCell}>{r.size}</td>
               <td style={tableCell}>{r.stage}</td>
               <td style={tableCell}>■13x{r.length_mm}</td>
-              <td style={tableCell}>{r.screw ? "有" : "無"}</td>
+              <td style={tableCell}>{r.tap ? "TAP有" : "TAP無"}</td>
               <td style={tableCellRight}>{r.qty_per_unit}</td>
               <td style={tableCell}>
                 <button
@@ -1143,19 +1519,19 @@ function InventoryPanel({
   inv: InvItem[];
   onUpdate: (
     length_mm: number,
-    screw: boolean,
+    tap: boolean,
     qty_on_hand: number
   ) => Promise<void>;
   savingInProgress: boolean;
 }) {
   const [lengthMm, setLengthMm] = useState(0);
-  const [screw, setScrew] = useState(false);
+  const [tap, setTap] = useState(false);
   const [qty, setQty] = useState(0);
 
   const visibleInv = inv.filter((r) => r.qty_on_hand > 0);
   const sorted = [...visibleInv].sort(
     (a, b) =>
-      a.length_mm - b.length_mm || Number(a.screw) - Number(b.screw)
+      a.length_mm - b.length_mm || Number(a.tap) - Number(b.tap)
   );
 
   return (
@@ -1180,15 +1556,15 @@ function InventoryPanel({
         </label>
 
         <label style={selectLabel}>
-          ネジ
+          TAP
           <select
-            value={screw ? "1" : "0"}
-            onChange={(e) => setScrew(e.target.value === "1")}
+            value={tap ? "1" : "0"}
+            onChange={(e) => setTap(e.target.value === "1")}
             style={bigSelect}
             className="field-large"
           >
-            <option value="0">無</option>
-            <option value="1">有</option>
+            <option value="0">TAP無</option>
+            <option value="1">TAP有</option>
           </select>
         </label>
 
@@ -1209,7 +1585,7 @@ function InventoryPanel({
         </label>
 
         <button
-          onClick={() => onUpdate(lengthMm, screw, qty)}
+          onClick={() => onUpdate(lengthMm, tap, qty)}
           disabled={savingInProgress}
           style={secondaryButton}
         >
@@ -1221,18 +1597,18 @@ function InventoryPanel({
         <thead>
           <tr>
             <th style={tableHeaderCell}>長さ</th>
-            <th style={tableHeaderCell}>ネジ</th>
+            <th style={tableHeaderCell}>TAP</th>
             <th style={tableHeaderCellRight}>在庫</th>
           </tr>
         </thead>
         <tbody>
           {sorted.map((r) => (
             <tr
-              key={`${r.length_mm}-${r.screw}`}
+              key={`${r.length_mm}-${r.tap}`}
               className="data-row"
             >
               <td style={tableCell}>{r.length_mm}mm</td>
-              <td style={tableCell}>{r.screw ? "有" : "無"}</td>
+              <td style={tableCell}>{r.tap ? "TAP有" : "TAP無"}</td>
               <td style={tableCellRight}>{r.qty_on_hand}</td>
             </tr>
           ))}

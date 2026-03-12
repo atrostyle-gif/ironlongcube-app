@@ -14,9 +14,16 @@ type BomItem = {
   size?: string;
   stage: number;
   length_mm: number;
-  screw: boolean;
+  tap: boolean;
   qty_per_unit: number;
 };
+
+/** 既存データ互換: 読込時 tap が無ければ screw を tap として扱う */
+function normalizeTap(item: { tap?: boolean; screw?: boolean }): boolean {
+  if (typeof item.tap === "boolean") return item.tap;
+  if (typeof item.screw === "boolean") return item.screw;
+  return false;
+}
 
 const jsonHeaders = {
   "Content-Type": "application/json",
@@ -107,7 +114,21 @@ export const handler: Handler = async (event) => {
           body: jsonBody({ ok: false, error: "Invalid JSON in stored file" }),
         };
       }
-      const items = Array.isArray(parsed?.items) ? parsed.items : [];
+      const rawItems = Array.isArray(parsed?.items) ? parsed.items : [];
+      const items: BomItem[] = rawItems
+        .filter((i: unknown) => i != null && typeof i === "object")
+        .map((i: Record<string, unknown>) => {
+          const row = i as Record<string, unknown>;
+          return {
+            model_id: row.model_id,
+            model: row.model,
+            size: row.size,
+            stage: row.stage,
+            length_mm: row.length_mm,
+            tap: normalizeTap(row as { tap?: boolean; screw?: boolean }),
+            qty_per_unit: row.qty_per_unit,
+          } as BomItem;
+        });
       return {
         statusCode: 200,
         headers: jsonHeaders,
@@ -150,16 +171,27 @@ export const handler: Handler = async (event) => {
       const body = event.body ?? "{}";
       const parsed = JSON.parse(body) as { items?: unknown };
       const rawItems = Array.isArray(parsed?.items) ? parsed.items : [];
-      items = rawItems.filter(
-        (i): i is BomItem =>
-          i != null &&
-          typeof i === "object" &&
-          typeof (i as BomItem).model === "string" &&
-          typeof (i as BomItem).stage === "number" &&
-          typeof (i as BomItem).length_mm === "number" &&
-          typeof (i as BomItem).screw === "boolean" &&
-          typeof (i as BomItem).qty_per_unit === "number"
-      ) as BomItem[];
+      items = rawItems
+        .filter(
+          (i: unknown) =>
+            i != null &&
+            typeof i === "object" &&
+            typeof (i as BomItem).model === "string" &&
+            typeof (i as BomItem).stage === "number" &&
+            typeof (i as BomItem).length_mm === "number" &&
+            (typeof (i as BomItem).tap === "boolean" ||
+              typeof (i as { screw?: boolean }).screw === "boolean") &&
+            typeof (i as BomItem).qty_per_unit === "number"
+        )
+        .map((i: Record<string, unknown>) => ({
+          model_id: (i as BomItem).model_id,
+          model: (i as BomItem).model,
+          size: (i as BomItem).size,
+          stage: (i as BomItem).stage,
+          length_mm: (i as BomItem).length_mm,
+          tap: normalizeTap(i as { tap?: boolean; screw?: boolean }),
+          qty_per_unit: (i as BomItem).qty_per_unit,
+        })) as BomItem[];
     } catch (parseErr) {
       console.error("bom POST: invalid JSON body", parseErr);
       return {
