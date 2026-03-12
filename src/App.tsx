@@ -349,17 +349,25 @@ export default function App() {
     const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
     const productName = `${getModelLabel(modelId)} ${size} ${stage}段`;
 
+    const KERF_MM = 3;
     const tableRows = rows
       .map(
-        (r, i) =>
-          `<tr>
+        (r, i) => {
+          const totalMm =
+            r.shortage <= 0
+              ? 0
+              : r.length_mm * r.shortage + KERF_MM * (r.shortage - 1);
+          return `<tr>
             <td>${i + 1}</td>
             <td>SS黒皮</td>
             <td>■13x${r.length_mm}</td>
             <td>${r.on_hand}</td>
-            <td>${r.shortage}</td>
-            <td>${r.screw ? "MC" : "溶接"}</td>
-          </tr>`
+            <td>${r.required}</td>
+            <td class="cut-qty">${r.shortage}</td>
+            <td>${r.screw ? "MC (TAP加工)" : "溶接"}</td>
+            <td class="total-length">${totalMm}</td>
+          </tr>`;
+        }
       )
       .join("");
 
@@ -376,7 +384,9 @@ export default function App() {
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { border: 1px solid #333; padding: 6px 8px; text-align: left; }
   th { background: #eee; font-weight: 600; }
-  td:nth-child(1), td:nth-child(4), td:nth-child(5) { text-align: right; }
+  td:nth-child(1), td:nth-child(4), td:nth-child(5), td:nth-child(6), td:nth-child(7), td:nth-child(8) { text-align: right; }
+  .cut-qty { width: 4em; max-width: 4em; }
+  .total-length { white-space: nowrap; text-align: right; }
   @media print {
     @page { size: A4; margin: 15mm; }
     body { font-family: sans-serif; }
@@ -395,11 +405,13 @@ export default function App() {
         <th>材質</th>
         <th>サイズ</th>
         <th>在庫数</th>
-        <th>切断本数</th>
-        <th>工程</th>
+        <th>必要数</th>
+        <th class="cut-qty">切断本数</th>
+        <th>次工程</th>
+        <th class="total-length">総長</th>
       </tr>
     </thead>
-    <tbody>${tableRows || "<tr><td colspan=\"6\">切断必要なし</td></tr>"}</tbody>
+    <tbody>${tableRows || "<tr><td colspan=\"8\">切断必要なし</td></tr>"}</tbody>
   </table>
 </body>
 </html>`;
