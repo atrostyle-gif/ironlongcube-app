@@ -30,7 +30,6 @@ import {
   aggregateToNeedRows,
   getPartWithBreakdown,
   type NeedRowFromList,
-  type PartWithBreakdown,
 } from "./lib/productionList";
 import {
   fetchDrawings,
@@ -41,6 +40,40 @@ import {
 
 const STAGE_OPTIONS = [1, 2, 3, 4, 5];
 const LENGTH_OPTIONS = [205, 231, 410, 436, 859, 1282, 1679, 1705, 2102, 2128];
+
+function buildProductionSummaryLines(
+  list: ProductionItem[],
+  getModelLabel: (id: string) => string
+): string[] {
+  return list.map(
+    (p) =>
+      `${getModelLabel(p.model_id as ModelId)} / ${p.size} / ${p.stage}段 / ${p.qty}台`
+  );
+}
+
+function formatLengthLabel(length_mm: number, tap: boolean): string {
+  return tap ? `${length_mm}mm (TAP)` : `${length_mm}mm`;
+}
+
+function formatTotalLengthMeters(totalMm: number): string {
+  return `${(totalMm / 1000).toFixed(2)}m`;
+}
+
+/** 印刷用：切断数ベースの1行 */
+type CutSheetRow = {
+  length_mm: number;
+  tap: boolean;
+  required: number;
+  on_hand: number;
+  cut_qty: number;
+  next_process: string;
+  total_cut_length_mm: number;
+  breakdown: { label: string; qty: number }[];
+};
+
+function buildBreakdownText(breakdown: { label: string; qty: number }[]): string {
+  return breakdown.map((x) => `${x.label}:${x.qty}本`).join(" / ");
+}
 
 export default function App() {
   // Inventory: inv = 一覧, 初回は fetchInventory(), 追加/更新で saveInventory() 後に setInv
@@ -242,7 +275,31 @@ export default function App() {
     [expandedList]
   );
 
-  const hasShortage = needRows.some((r) => r.shortage > 0);
+  /** 印刷用：切断数ベース。cut_qty = max(0, required - on_hand), 総長 = length_mm * cut_qty */
+  const cutSheetRows = useMemo((): CutSheetRow[] => {
+    return partWithBreakdown.map((p) => {
+      const on_hand = invMap.get(`${p.length_mm}|${p.tap ? 1 : 0}`) ?? 0;
+      const required = p.qty;
+      const cut_qty = Math.max(0, required - on_hand);
+      return {
+        length_mm: p.length_mm,
+        tap: p.tap,
+        required,
+        on_hand,
+        cut_qty,
+        next_process: p.tap ? "MC (TAP加工)" : "溶接",
+        total_cut_length_mm: p.length_mm * cut_qty,
+        breakdown: p.breakdown,
+      };
+    });
+  }, [partWithBreakdown, invMap]);
+
+  /** 印刷対象：切断数 > 0 の行のみ */
+  const cutSheetRowsFiltered = useMemo(
+    () => cutSheetRows.filter((r) => r.cut_qty > 0),
+    [cutSheetRows]
+  );
+
   const shortageKindCount = needRows.filter((r) => r.shortage > 0).length;
   const shortageTotalQty = needRows.reduce((s, r) => s + r.shortage, 0);
 
@@ -390,10 +447,7 @@ export default function App() {
   async function copyCutList() {
     const lines = needRows
       .filter((r) => r.shortage > 0)
-      .map(
-        (r) =>
-          `${r.length_mm}mm\t${r.tap ? "TAP有" : "TAP無"}\t${r.shortage}本`
-      );
+      .map((r) => `${formatLengthLabel(r.length_mm, r.tap)}\t${r.shortage}本`);
 
     const text = lines.length ? lines.join("\n") : "不足なし";
     await navigator.clipboard.writeText(text);
@@ -401,30 +455,32 @@ export default function App() {
   }
 
   function openCutSheetWithBreakdown(
-    parts: PartWithBreakdown[],
-    productName: string,
+    rows: CutSheetRow[],
+    summaryLines: string[],
     dateStr: string
   ) {
-    const KERF_MM = 3;
-    let totalMm = 0;
-    const sections = parts
-      .map((p) => {
-        const total =
-          p.qty <= 0 ? 0 : p.length_mm * p.qty + KERF_MM * (p.qty - 1);
-        totalMm += total;
-        const tapLabel = p.tap ? "TAP有" : "TAP無";
-        const breakdownRows =
-          p.breakdown.length > 0
-            ? p.breakdown
-                .map(
-                  (b) =>
-                    `<tr class="breakdown-row"><td colspan="2"></td><td class="breakdown-cell" colspan="4">${b.label}: ${b.qty}本</td></tr>`
-                )
-                .join("")
+    let totalCutMm = 0;
+    const sections = rows
+      .map((r) => {
+        totalCutMm += r.total_cut_length_mm;
+        const lengthLabel = formatLengthLabel(r.length_mm, r.tap);
+        const totalStr = formatTotalLengthMeters(r.total_cut_length_mm);
+        const breakdownText =
+          r.breakdown.length > 0
+            ? buildBreakdownText(r.breakdown)
             : "";
-        return `<tr class="part-header"><td>${p.length_mm}mm</td><td>${tapLabel}</td><td colspan="2">${p.qty}本</td><td>${p.tap ? "MC (TAP加工)" : "溶接"}</td><td class="total-length">${total}</td></tr>${breakdownRows}`;
+        const breakdownRow =
+          breakdownText !== ""
+            ? `<tr class="breakdown-row"><td colspan="6" class="breakdown-cell">${breakdownText}</td></tr>`
+            : "";
+        return `<tr class="part-header"><td>${lengthLabel}</td><td class="num">${r.required}</td><td class="num">${r.on_hand}</td><td class="num cut-qty-col">${r.cut_qty}</td><td>${r.next_process}</td><td class="total-length">${totalStr}</td></tr>${breakdownRow}`;
       })
       .join("");
+
+    const productHtml =
+      summaryLines.length > 0
+        ? summaryLines.map((line) => `<div class="product-line">${line}</div>`).join("")
+        : "<div class=\"product-line\">（製作予定なし）</div>";
 
     const html = `<!DOCTYPE html>
 <html lang="ja">
@@ -436,14 +492,17 @@ export default function App() {
   body { font-family: sans-serif; margin: 0; padding: 15mm; font-size: 16px; }
   .toolbar { margin-bottom: 12px; }
   .toolbar button { padding: 8px 16px; font-size: 15px; cursor: pointer; }
-  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; font-size: 17px; flex-wrap: wrap; gap: 8px; }
-  .product { font-weight: 600; font-size: 1.4rem; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; font-size: 17px; flex-wrap: wrap; gap: 8px; }
+  .product-block { font-weight: 600; font-size: 1.4rem; }
+  .product-line { margin-bottom: 2px; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; }
   th, td { border: 1px solid #333; padding: 8px 10px; text-align: left; }
   th { background: #eee; font-weight: 600; text-align: center; }
   .part-header { background: #fff; font-weight: 600; }
-  .breakdown-row { background: #f9f9f9; }
-  .breakdown-cell { font-size: 13px; color: #444; padding-left: 24px; }
+  .num { text-align: right; }
+  th.cut-qty-col, td.cut-qty-col { font-weight: 700; background-color: #fef3c7; font-size: 1.1em; text-align: right; }
+  .breakdown-row { background: #f5f5f5; }
+  .breakdown-cell { font-size: 12px; color: #555; padding-left: 16px; padding-top: 2px; padding-bottom: 2px; }
   .total-length { text-align: right; white-space: nowrap; }
   @media print { .toolbar { display: none !important; }
     @page { size: A4 landscape; margin: 15mm; }
@@ -454,18 +513,21 @@ export default function App() {
 <body>
   <div class="toolbar"><button type="button" onclick="window.print()">印刷</button></div>
   <div class="header">
-    <span class="product">品名：${productName}</span>
+    <div class="product-block">
+      <div>品名</div>
+      ${productHtml}
+    </div>
     <span>発注日：${dateStr}</span>
   </div>
   <table>
     <thead>
       <tr>
-        <th>長さ</th><th>TAP</th><th>本数</th><th></th><th>次工程</th><th>総長(mm)</th>
+        <th>長さ</th><th>必要数</th><th>在庫数</th><th class="cut-qty-col">切断数</th><th>次工程</th><th>総長</th>
       </tr>
     </thead>
-    <tbody>${sections}</tbody>
+    <tbody>${sections.length ? sections : "<tr><td colspan=\"6\">切断必要なし</td></tr>"}</tbody>
     <tfoot>
-      <tr><td colspan="5" style="text-align: right; font-weight: 600;">総長合計</td><td class="total-length" style="font-weight: 600;">${totalMm}</td></tr>
+      <tr><td colspan="5" style="text-align: right; font-weight: 600;">総長合計</td><td class="total-length" style="font-weight: 600;">${formatTotalLengthMeters(totalCutMm)}</td></tr>
     </tfoot>
   </table>
 </body>
@@ -488,8 +550,10 @@ export default function App() {
     }
     const today = new Date();
     const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
-    const productName = "製作予定一括 切断指示書";
-    openCutSheetWithBreakdown(partWithBreakdown, productName, dateStr);
+    const summaryLines = buildProductionSummaryLines(productionList, (id) =>
+      getModelLabel(id as ModelId)
+    );
+    openCutSheetWithBreakdown(cutSheetRowsFiltered, summaryLines, dateStr);
   }
 
   const KERF_MM = 3;
@@ -505,10 +569,11 @@ export default function App() {
         const total =
           p.qty <= 0 ? 0 : p.length_mm * p.qty + KERF_MM * (p.qty - 1);
         totalMm += total;
+        const sizeLabel = `■13x${p.length_mm}${p.tap ? " (TAP)" : ""}`;
         return `<tr>
           <td>${i + 1}</td>
           <td>SS黒皮</td>
-          <td>■13x${p.length_mm}</td>
+          <td>${sizeLabel}</td>
           <td>0</td>
           <td>0</td>
           <td class="cut-qty">${p.qty}</td>
@@ -567,7 +632,7 @@ export default function App() {
     </thead>
     <tbody>${rows}</tbody>
     <tfoot>
-      <tr><td colspan="7" style="text-align: right; font-weight: 600;">総長合計</td><td class="total-length" style="font-weight: 600;">${totalMm}</td></tr>
+      <tr><td colspan="7" style="text-align: right; font-weight: 600;">総長合計</td><td class="total-length" style="font-weight: 600;">${formatTotalLengthMeters(totalMm)}</td></tr>
     </tfoot>
   </table>
 </body>
@@ -587,15 +652,17 @@ export default function App() {
     if (productionList.length === 0) return;
     setIssueCutError(null);
     setIssueCutLoading(true);
-    const productName = "製作予定一括 切断指示確定";
-    const partsSnapshot = [...partWithBreakdown];
+    const summaryLines = buildProductionSummaryLines(productionList, (id) =>
+      getModelLabel(id as ModelId)
+    );
+    const cutSheetSnapshot = cutSheetRowsFiltered.map((r) => ({ ...r }));
     try {
       const res = await postIssueCut(productionList);
       setLastIssueId(res.issue_id);
       setLastIssueParts(res.parts);
       const today = new Date();
       const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
-      openCutSheetWithBreakdown(partsSnapshot, productName, dateStr);
+      openCutSheetWithBreakdown(cutSheetSnapshot, summaryLines, dateStr);
       await fetchInventory().then(setInv).catch(() => {});
       setProductionList([]);
     } catch (err) {
@@ -971,11 +1038,7 @@ export default function App() {
               </button>
               <button
                 onClick={confirmAndPrintCutSheet}
-                disabled={
-                  issueCutLoading ||
-                  productionList.length === 0 ||
-                  hasShortage
-                }
+                disabled={issueCutLoading || productionList.length === 0}
                 style={primaryButton}
               >
                 {issueCutLoading ? "処理中..." : "切断指示を確定して印刷"}
@@ -1041,18 +1104,15 @@ export default function App() {
                   }}
                 >
                   不足部材種類数: {shortageKindCount} / 不足合計本数: {shortageTotalQty}
-                  {hasShortage && (
-                    <span style={{ display: "block", marginTop: 4 }}>
-                      在庫が不足しているため確定できません。
-                    </span>
-                  )}
+                  <span style={{ display: "block", marginTop: 4 }}>
+                    不足部材があります。在庫分を差し引いたうえで切断指示を確定します。
+                  </span>
                 </div>
               )}
               <table style={table}>
                 <thead>
                   <tr>
                     <th style={tableHeaderCell}>長さ</th>
-                    <th style={tableHeaderCell}>TAP</th>
                     <th style={tableHeaderCellRight}>必要数</th>
                     <th style={tableHeaderCellRight}>在庫数</th>
                     <th style={tableHeaderCellRight}>差分</th>
@@ -1071,8 +1131,7 @@ export default function App() {
                           hasSurplus ? rowSurplus : undefined
                         }
                       >
-                        <td style={tableCell}>{r.length_mm}mm</td>
-                        <td style={tableCell}>{r.tap ? "TAP有" : "TAP無"}</td>
+                        <td style={tableCell}>{formatLengthLabel(r.length_mm, r.tap)}</td>
                         <td style={tableCellRight}>{r.required}</td>
                         <td style={tableCellRight}>{r.on_hand}</td>
                         <td style={tableCellRight}>{r.diff}</td>
@@ -1091,22 +1150,49 @@ export default function App() {
                   })}
                 </tbody>
               </table>
-              {productionList.length > 0 && partWithBreakdown.length > 0 && (
+              {productionList.length > 0 && cutSheetRowsFiltered.length > 0 && (
                 <div style={{ marginTop: 16 }}>
                   <h4 style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
-                    切断指示プレビュー（長さ別まとめ）
+                    切断指示プレビュー（切断数ベース）
                   </h4>
-                  <ul style={{ margin: 0, paddingLeft: 20, fontSize: 14 }}>
-                    {partWithBreakdown.map((p) => (
-                      <li key={`${p.length_mm}-${p.tap}`}>
-                        {p.length_mm}mm / {p.tap ? "TAP有" : "TAP無"} × {p.qty}本
-                        {p.breakdown.length > 0 && (
-                          <ul style={{ marginTop: 4, paddingLeft: 16, fontSize: 13, color: "#555" }}>
-                            {p.breakdown.map((b) => (
-                              <li key={b.label}>{b.label}: {b.qty}本</li>
-                            ))}
-                          </ul>
-                        )}
+                  <table style={table}>
+                    <thead>
+                      <tr>
+                        <th style={tableHeaderCell}>長さ</th>
+                        <th style={tableHeaderCellRight}>必要数</th>
+                        <th style={tableHeaderCellRight}>在庫数</th>
+                        <th style={cutQtyHeaderStyle}>切断数</th>
+                        <th style={tableHeaderCell}>次工程</th>
+                        <th style={tableHeaderCellRight}>総長</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cutSheetRowsFiltered.map((r) => (
+                        <tr key={`${r.length_mm}-${r.tap}`}>
+                          <td style={tableCell}>{formatLengthLabel(r.length_mm, r.tap)}</td>
+                          <td style={tableCellRight}>{r.required}</td>
+                          <td style={tableCellRight}>{r.on_hand}</td>
+                          <td style={cutQtyCellStyle}>{r.cut_qty}</td>
+                          <td style={tableCell}>{r.next_process}</td>
+                          <td style={tableCellRight}>{formatTotalLengthMeters(r.total_cut_length_mm)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td colSpan={5} style={{ textAlign: "right", fontWeight: 600 }}>総長合計</td>
+                        <td style={{ textAlign: "right", fontWeight: 600 }}>
+                          {formatTotalLengthMeters(
+                            cutSheetRowsFiltered.reduce((s, r) => s + r.total_cut_length_mm, 0)
+                          )}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                  <ul style={{ marginTop: 8, margin: 0, paddingLeft: 20, fontSize: 12, color: "#555" }}>
+                    {cutSheetRowsFiltered.map((r) => (
+                      <li key={`${r.length_mm}-${r.tap}`}>
+                        {formatLengthLabel(r.length_mm, r.tap)}: {r.breakdown.length > 0 ? buildBreakdownText(r.breakdown) : "—"}
                       </li>
                     ))}
                   </ul>
@@ -1726,6 +1812,21 @@ const tableCell: React.CSSProperties = {
 const tableCellRight: React.CSSProperties = {
   ...tableCell,
   textAlign: "right",
+};
+
+/** 切断数列を目立たせる（プレビュー・印刷で最重要） */
+const cutQtyHeaderStyle: React.CSSProperties = {
+  ...tableHeaderCellRight,
+  backgroundColor: "#fef3c7",
+  fontWeight: 700,
+  fontSize: 14,
+};
+
+const cutQtyCellStyle: React.CSSProperties = {
+  ...tableCellRight,
+  backgroundColor: "#fef9c3",
+  fontWeight: 700,
+  fontSize: 15,
 };
 
 const shortageCell: React.CSSProperties = {

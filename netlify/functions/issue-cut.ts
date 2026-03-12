@@ -200,26 +200,12 @@ export const handler: Handler = async (event) => {
     invMap.set(`${it.length_mm}|${tap ? 1 : 0}`, it.qty_on_hand);
   }
 
-  for (const p of parts) {
-    const key = `${p.length_mm}|${p.tap ? 1 : 0}`;
-    const onHand = invMap.get(key) ?? 0;
-    if (onHand < p.qty) {
-      return {
-        statusCode: 400,
-        headers: jsonHeaders,
-        body: jsonBody({
-          ok: false,
-          error: "insufficient inventory",
-          message: "在庫が不足しています",
-        }),
-      };
-    }
-  }
-
+  // 在庫はある分だけ消費。不足分があっても確定可。在庫はマイナスにしない。
   for (const p of parts) {
     const key = `${p.length_mm}|${p.tap ? 1 : 0}`;
     const current = invMap.get(key) ?? 0;
-    invMap.set(key, current - p.qty);
+    const newQty = Math.max(0, current - p.qty);
+    invMap.set(key, newQty);
   }
 
   const newInvList: InvItem[] = [];
