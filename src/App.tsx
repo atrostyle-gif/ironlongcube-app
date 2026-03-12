@@ -350,6 +350,7 @@ export default function App() {
     const productName = `${getModelLabel(modelId)} ${size} ${stage}段`;
 
     const KERF_MM = 3;
+    let initialTotalMm = 0;
     const tableRows = rows
       .map(
         (r, i) => {
@@ -357,6 +358,7 @@ export default function App() {
             r.shortage <= 0
               ? 0
               : r.length_mm * r.shortage + KERF_MM * (r.shortage - 1);
+          initialTotalMm += totalMm;
           const requiredPerUnit = units > 0 ? Math.round(r.required / units) : r.required;
           return `<tr data-length-mm="${r.length_mm}" data-required-per-unit="${requiredPerUnit}">
             <td>${i + 1}</td>
@@ -434,10 +436,24 @@ export default function App() {
       </tr>
     </thead>
     <tbody>${tableRows.length ? tableRows : "<tr><td colspan=\"8\">切断必要なし</td></tr>"}</tbody>
+    <tfoot>
+      <tr class="total-row">
+        <td colspan="7" style="text-align: right; font-weight: 600;">総長合計</td>
+        <td id="total-length-sum" class="total-length" style="font-weight: 600;">${initialTotalMm}</td>
+      </tr>
+    </tfoot>
   </table>
   <script>
     (function() {
       var KERF = 3;
+      function updateTotalLength() {
+        var sum = 0;
+        [].forEach.call(document.querySelectorAll(".calc-total"), function(td) {
+          sum += parseInt(td.textContent.trim(), 10) || 0;
+        });
+        var el = document.getElementById("total-length-sum");
+        if (el) el.textContent = sum;
+      }
       function recalcRow(tr) {
         var len = parseInt(tr.getAttribute("data-length-mm"), 10);
         if (isNaN(len)) return;
@@ -449,6 +465,7 @@ export default function App() {
         var total = shortage <= 0 ? 0 : len * shortage + KERF * (shortage - 1);
         tr.querySelector(".calc-shortage").textContent = shortage;
         tr.querySelector(".calc-total").textContent = total;
+        updateTotalLength();
       }
       function recalcAllFromUnits() {
         var u = parseInt(document.getElementById("units-input").textContent.trim(), 10) || 0;
@@ -458,6 +475,7 @@ export default function App() {
           tr.querySelector(".editable-required").textContent = rpu * per;
           recalcRow(tr);
         });
+        updateTotalLength();
       }
       function init() {
         var tbody = document.querySelector("table tbody");
@@ -469,6 +487,7 @@ export default function App() {
         });
         var unitsEl = document.getElementById("units-input");
         if (unitsEl) unitsEl.addEventListener("input", recalcAllFromUnits);
+        updateTotalLength();
       }
       if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
       else init();
