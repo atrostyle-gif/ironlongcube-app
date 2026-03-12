@@ -379,18 +379,19 @@ export default function App() {
 <title>切断指示書</title>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: sans-serif; margin: 0; padding: 15mm; }
+  body { font-family: sans-serif; margin: 0; padding: 15mm; font-size: 16px; }
   .toolbar { margin-bottom: 12px; }
-  .toolbar button { padding: 8px 16px; font-size: 14px; cursor: pointer; }
-  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; font-size: 14px; flex-wrap: wrap; gap: 8px; }
+  .toolbar button { padding: 8px 16px; font-size: 15px; cursor: pointer; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; font-size: 17px; flex-wrap: wrap; gap: 8px; }
   .product { font-weight: 600; font-size: 1.4rem; }
   .header-units { display: flex; align-items: center; gap: 6px; }
   .header-units [contenteditable="true"] { min-width: 2.5em; text-align: right; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { border: 1px solid #333; padding: 6px 8px; text-align: left; }
+  table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
+  th, td { border: 1px solid #333; padding: 8px 10px; text-align: left; width: 12.5%; }
   th { background: #eee; font-weight: 600; text-align: center; }
+  tbody tr:nth-child(even) { background: #f0f0f0; }
+  tbody tr:nth-child(odd) { background: #fff; }
   td:nth-child(1), td:nth-child(4), td:nth-child(5), td:nth-child(6), td:nth-child(7), td:nth-child(8) { text-align: right; }
-  .cut-qty { width: 4em; max-width: 4em; }
   .total-length { white-space: nowrap; text-align: right; }
   [contenteditable="true"] { outline: 1px dotted #999; }
   @media print {
@@ -398,6 +399,7 @@ export default function App() {
     @page { size: A4; margin: 15mm; }
     body { font-family: sans-serif; }
     [contenteditable="true"] { outline: none; }
+    tbody tr:nth-child(even) { background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   }
 </style>
 </head>
