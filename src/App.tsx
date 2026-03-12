@@ -404,7 +404,7 @@ export default function App() {
   [contenteditable="true"] { outline: 1px dotted #999; }
   @media print {
     .toolbar { display: none !important; }
-    @page { size: A4; margin: 15mm; }
+    @page { size: A4 landscape; margin: 15mm; }
     body { font-family: sans-serif; }
     [contenteditable="true"] { outline: none; }
     tbody tr:nth-child(even) { background: #f0f0f0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
