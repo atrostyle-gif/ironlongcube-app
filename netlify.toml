@@ -1,8 +1,11 @@
-# Vite ビルド → dist を公開。Functions は netlify/functions（本番で DROPBOX_ACCESS_TOKEN を環境変数に設定すること）
+# Vite ビルド → dist を公開。Functions は netlify/functions（本番で DROPBOX_* 環境変数を設定すること）
 [build]
   command = "npm run build"
   publish = "dist"
   functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
 
 [dev]
   command = "npm run dev"
