@@ -387,7 +387,15 @@ export default function App() {
   .header-units { display: flex; align-items: center; gap: 6px; }
   .header-units [contenteditable="true"] { min-width: 2.5em; text-align: right; }
   table { width: 100%; border-collapse: collapse; font-size: 15px; table-layout: fixed; }
-  th, td { border: 1px solid #333; padding: 8px 10px; text-align: left; width: 12.5%; }
+  th, td { border: 1px solid #333; padding: 8px 10px; text-align: left; }
+  th:nth-child(1), td:nth-child(1) { width: 5%; }
+  th:nth-child(2), td:nth-child(2) { width: 12%; }
+  th:nth-child(3), td:nth-child(3) { width: 15%; }
+  th:nth-child(4), td:nth-child(4) { width: 12%; }
+  th:nth-child(5), td:nth-child(5) { width: 12%; }
+  th:nth-child(6), td:nth-child(6) { width: 12%; }
+  th:nth-child(7), td:nth-child(7) { width: 15%; }
+  th:nth-child(8), td:nth-child(8) { width: 15%; }
   th { background: #eee; font-weight: 600; text-align: center; }
   tbody tr:nth-child(even) { background: #f0f0f0; }
   tbody tr:nth-child(odd) { background: #fff; }
