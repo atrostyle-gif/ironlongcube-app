@@ -23,7 +23,7 @@ import {
   type TemplateModelId,
   type TemplateSize,
 } from "./data/bomTemplates";
-import { postIssueCut, type IssueCutPart } from "./lib/issueCutApi";
+import type { IssueCutPart } from "./lib/issueCutApi";
 import type { ProductionItem } from "./types/cutIssue";
 import {
   expandProductionList,
@@ -37,8 +37,11 @@ import {
   getDrawingFileUrl,
   type Drawing,
 } from "./lib/drawingApi";
+import CutPreview from "./CutPreview";
 
 const STAGE_OPTIONS = [1, 2, 3, 4, 5];
+
+const CUT_PREVIEW_STORAGE_KEY = "cutPreviewInit";
 
 function buildProductionSummaryLines(
   list: ProductionItem[],
@@ -75,6 +78,13 @@ function buildBreakdownText(breakdown: { label: string; qty: number }[]): string
 }
 
 export default function App() {
+  if (typeof window !== "undefined" && window.location.hash === "#cut-preview") {
+    return <CutPreview />;
+  }
+  return <AppMain />;
+}
+
+function AppMain() {
   // Inventory: inv = 一覧, 初回は fetchInventory(), 追加/更新で saveInventory() 後に setInv
   const [inv, setInv] = useState<InvItem[]>([]);
   const [invLoading, setInvLoading] = useState(true);
@@ -105,8 +115,6 @@ export default function App() {
   const [lastIssueParts, setLastIssueParts] = useState<IssueCutPart[] | null>(
     null
   );
-  const [issueCutLoading, setIssueCutLoading] = useState(false);
-  const [issueCutError, setIssueCutError] = useState<string | null>(null);
 
   const [drawings, setDrawings] = useState<Drawing[]>([]);
   const [drawingUploading, setDrawingUploading] = useState(false);
@@ -652,27 +660,49 @@ export default function App() {
     w.focus();
   }
 
-  async function confirmAndPrintCutSheet() {
-    if (productionList.length === 0) return;
-    setIssueCutError(null);
-    setIssueCutLoading(true);
-    const summaryLines = buildProductionSummaryLines(productionList, (id) =>
-      getModelLabel(id as ModelId)
-    );
-    const cutSheetSnapshot = cutSheetRowsFiltered.map((r) => ({ ...r }));
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return;
+      const d = e.data as { type?: string; issue_id?: string; parts?: IssueCutPart[] };
+      if (d?.type === "cut-issued" && d.issue_id && Array.isArray(d.parts)) {
+        setLastIssueId(d.issue_id);
+        setLastIssueParts(d.parts);
+        fetchInventory().then(setInv).catch(() => {});
+        setProductionList([]);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  function openCutPreview() {
+    if (productionList.length === 0) {
+      alert("製作予定を追加してください");
+      return;
+    }
     try {
-      const res = await postIssueCut(productionList);
-      setLastIssueId(res.issue_id);
-      setLastIssueParts(res.parts);
-      const today = new Date();
-      const dateStr = `${today.getFullYear()}/${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}`;
-      openCutSheetWithBreakdown(cutSheetSnapshot, summaryLines, dateStr);
-      await fetchInventory().then(setInv).catch(() => {});
-      setProductionList([]);
+      sessionStorage.setItem(
+        CUT_PREVIEW_STORAGE_KEY,
+        JSON.stringify({
+          productionList: [...productionList],
+          bom: [...bom],
+          inventory: [...inv],
+        })
+      );
     } catch (err) {
-      setIssueCutError((err as Error)?.message ?? "切断指示の確定に失敗しました");
-    } finally {
-      setIssueCutLoading(false);
+      alert("データの保存に失敗しました");
+      return;
+    }
+    const url =
+      window.location.origin +
+      window.location.pathname +
+      window.location.search +
+      "#cut-preview";
+    const w = window.open(url, "_blank");
+    if (!w) {
+      alert(
+        "ポップアップがブロックされています。ポップアップを許可して再実行してください。"
+      );
     }
   }
 
@@ -1041,11 +1071,11 @@ export default function App() {
                 印刷用切断指示書
               </button>
               <button
-                onClick={confirmAndPrintCutSheet}
-                disabled={issueCutLoading || productionList.length === 0}
+                onClick={openCutPreview}
+                disabled={productionList.length === 0}
                 style={primaryButton}
               >
-                {issueCutLoading ? "処理中..." : "切断指示を確定して印刷"}
+                切断指示を開く
               </button>
               <button
                 onClick={reprintCutSheet}
@@ -1061,22 +1091,6 @@ export default function App() {
               )}
             </div>
           </div>
-
-          {issueCutError && (
-            <div
-              style={{
-                marginTop: 8,
-                padding: 10,
-                background: "#fef2f2",
-                border: "1px solid #fecaca",
-                borderRadius: 6,
-                color: "#b91c1c",
-                fontSize: 13,
-              }}
-            >
-              {issueCutError}
-            </div>
-          )}
 
           {showBomWarning ? (
             <div

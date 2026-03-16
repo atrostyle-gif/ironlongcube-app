@@ -36,6 +36,13 @@ type InvItem = {
 
 type PartQty = { length_mm: number; tap: boolean; qty: number };
 
+type CutRow = {
+  length_mm: number;
+  tap: boolean;
+  required: number;
+  cut_qty: number;
+};
+
 /** 既存データ互換: 読込時 tap が無ければ screw を tap として扱う */
 function normalizeTap(item: { tap?: boolean; screw?: boolean }): boolean {
   if (typeof item.tap === "boolean") return item.tap;
@@ -141,9 +148,13 @@ export const handler: Handler = async (event) => {
   const dbx = new Dropbox({ accessToken: token });
 
   let productions: ProductionItem[];
+  let cut_rows: CutRow[] | undefined;
   try {
     const body = event.body ?? "{}";
-    const parsed = JSON.parse(body) as { productions?: unknown };
+    const parsed = JSON.parse(body) as {
+      productions?: unknown;
+      cut_rows?: unknown;
+    };
     if (!Array.isArray(parsed?.productions)) {
       return {
         statusCode: 400,
@@ -152,6 +163,9 @@ export const handler: Handler = async (event) => {
       };
     }
     productions = parsed.productions as ProductionItem[];
+    if (Array.isArray(parsed?.cut_rows)) {
+      cut_rows = parsed.cut_rows as CutRow[];
+    }
   } catch {
     return {
       statusCode: 400,
@@ -160,19 +174,28 @@ export const handler: Handler = async (event) => {
     };
   }
 
-  let bomData: { items?: BomItem[] };
-  try {
-    bomData = await downloadJson(dbx, BOM_PATH, { items: [] });
-  } catch (err) {
-    console.error("issue-cut: failed to load bom", err);
-    return {
-      statusCode: 500,
-      headers: jsonHeaders,
-      body: jsonBody({ ok: false, error: "Failed to load BOM" }),
-    };
+  let parts: PartQty[];
+  if (cut_rows && cut_rows.length > 0) {
+    parts = cut_rows.map((r) => ({
+      length_mm: r.length_mm,
+      tap: r.tap,
+      qty: r.required,
+    }));
+  } else {
+    let bomData: { items?: BomItem[] };
+    try {
+      bomData = await downloadJson(dbx, BOM_PATH, { items: [] });
+    } catch (err) {
+      console.error("issue-cut: failed to load bom", err);
+      return {
+        statusCode: 500,
+        headers: jsonHeaders,
+        body: jsonBody({ ok: false, error: "Failed to load BOM" }),
+      };
+    }
+    parts = computeParts(bomData, productions);
   }
 
-  const parts = computeParts(bomData, productions);
   if (parts.length === 0) {
     return {
       statusCode: 400,
@@ -200,7 +223,7 @@ export const handler: Handler = async (event) => {
     invMap.set(`${it.length_mm}|${tap ? 1 : 0}`, it.qty_on_hand);
   }
 
-  // 在庫はある分だけ消費。不足分があっても確定可。在庫はマイナスにしない。
+  // 在庫は required に対して消費。マイナスにしない。
   for (const p of parts) {
     const key = `${p.length_mm}|${p.tap ? 1 : 0}`;
     const current = invMap.get(key) ?? 0;
@@ -242,6 +265,7 @@ export const handler: Handler = async (event) => {
     created_at: string;
     productions: ProductionItem[];
     parts: PartQty[];
+    cut_rows?: CutRow[];
     inventory_applied: boolean;
   };
 
@@ -267,6 +291,7 @@ export const handler: Handler = async (event) => {
     created_at: now.toISOString(),
     productions,
     parts: [...parts],
+    cut_rows: cut_rows?.length ? cut_rows : undefined,
     inventory_applied: true,
   };
   cutIssues.push(newIssue);
@@ -286,9 +311,12 @@ export const handler: Handler = async (event) => {
     };
   }
 
+  const responseParts = cut_rows?.length
+    ? cut_rows.map((r) => ({ length_mm: r.length_mm, tap: r.tap, qty: r.cut_qty }))
+    : parts;
   return {
     statusCode: 200,
     headers: jsonHeaders,
-    body: jsonBody({ issue_id, parts }),
+    body: jsonBody({ issue_id, parts: responseParts, cut_rows: cut_rows ?? null }),
   };
 };
